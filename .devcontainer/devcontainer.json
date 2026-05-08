@@ -1,0 +1,94 @@
+{
+  "name": "dev-${localWorkspaceFolderBasename}",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+  "containerEnv": {
+    "AGENT_ID": "${localWorkspaceFolderBasename}"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "charliermarsh.ruff",
+        "davidanson.vscode-markdownlint",
+        "dbaeumer.vscode-eslint",
+        "eamodio.gitlens",
+        "esbenp.prettier-vscode",
+        "gruntfuggly.todo-tree",
+        "mhutchie.git-graph",
+        "ms-ossdata.vscode-pgsql",
+        "ms-python.debugpy",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-vscode-remote.remote-containers",
+        "redhat.vscode-xml",
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml"
+      ],
+      "settings": {
+        "[javascript]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "[json]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "[jsonc]": {
+          "editor.defaultFormatter": "vscode.json-language-features"
+        },
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff"
+        },
+        "[toml]": {
+          "editor.defaultFormatter": "tamasfe.even-better-toml"
+        },
+        "[typescript]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "[typescriptreact]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "[xml]": {
+          "editor.defaultFormatter": "redhat.vscode-xml"
+        },
+        "chat.editor.wordWrap": "on",
+        "diffEditor.experimental.showMoves": true,
+        "diffEditor.ignoreTrimWhitespace": false,
+        "editor.accessibilitySupport": "off",
+        "editor.codeActions.triggerOnFocusChange": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "editor.fontFamily": "JetBrains Mono",
+        "editor.fontLigatures": false,
+        "editor.fontVariations": false,
+        "editor.formatOnPaste": true,
+        "editor.formatOnSave": true,
+        "editor.mouseWheelScrollSensitivity": 1.5,
+        "editor.wordWrap": "on",
+        "eslint.validate": [
+          "typescript",
+          "javascript",
+          "typescriptreact",
+          "javascriptreact"
+        ],
+        "evenBetterToml.formatter.allowedBlankLines": 2,
+        "evenBetterToml.formatter.columnWidth": 88,
+        "python.analysis.autoFormatStrings": true,
+        "python.analysis.autoImportCompletions": true,
+        "python.analysis.diagnosticMode": "workspace",
+        "python.analysis.inlayHints.functionReturnTypes": true,
+        "python.analysis.languageServerMode": "full",
+        "python.analysis.typeCheckingMode": "strict",
+        "python.languageServer": "Pylance",
+        "ruff.lineLength": 88,
+        "typescript.enablePromptUseWorkspaceTsdk": true,
+        "typescript.tsdk": "node_modules/typescript/lib",
+        "typescript.tsserver.experimental.enableProjectDiagnostics": true,
+        "typescript.tsserver.watchOptions": "vscode",
+        "typescript.updateImportsOnFileMove.enabled": "always"
+      }
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true
+}
