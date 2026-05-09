@@ -108,6 +108,12 @@ Override only `format` and `header_name`, only within `allowed_formats` / `allow
 - `allowed_path_prefixes` — segment-aware prefix match: `/v1/charges` matches `/v1/charges` and `/v1/charges/abc`, not `/v1/charges-list`.
 - `allowed_path_pattern` — RE2 regex.
 
+Independent of either allowlist, any decoded path containing a `.` or `..`
+segment is refused before the allowlist runs. `url.Parse` decodes `%2e%2e` to
+`..` in the `Path` field but does not normalize, so a literal prefix or regex
+match would otherwise admit `/v1/charges/../admin` and let the upstream resolve
+it to `/admin`.
+
 **Method** (optional):
 
 - `allowed_methods` — uppercase, case-sensitive.

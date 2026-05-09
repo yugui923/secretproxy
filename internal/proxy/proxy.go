@@ -443,6 +443,18 @@ func validateHost(host string, secret *seal.Secret) error {
 }
 
 func validatePath(path string, secret *seal.Secret) error {
+	// Reject "." and ".." segments before consulting the allowlist. Go's
+	// url.Parse does not normalize these (and decodes %2e%2e to ".." in the
+	// Path field), so a literal prefix or regex match against
+	// allowed_path_prefixes / allowed_path_pattern would otherwise admit a
+	// path like /v1/charges/../admin which the upstream could then resolve to
+	// /admin. Refused unconditionally — no legitimate vendor URL needs dot
+	// segments.
+	for _, seg := range strings.Split(path, "/") {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("path %q contains %q segment", path, seg)
+		}
+	}
 	if len(secret.AllowedPathPrefixes) > 0 {
 		for _, p := range secret.AllowedPathPrefixes {
 			if path == p {

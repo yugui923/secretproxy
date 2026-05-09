@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -193,6 +194,99 @@ func TestValidatePath_noConstraint(t *testing.T) {
 	s := &seal.Secret{}
 	if err := validatePath("/anything", s); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestValidatePath_rejectsTraversalSegments closes the hole where url.Parse
+// keeps ".." literal in u.Path (and even decodes %2e%2e into "..") so a naive
+// prefix/regex check would admit /v1/charges/../admin while the upstream
+// resolves it to /admin. Reject unconditionally — and exercise the case
+// where no path allowlist is set so the guard's defense-in-depth posture
+// is locked in.
+func TestValidatePath_rejectsTraversalSegments(t *testing.T) {
+	cases := []struct {
+		name string
+		s    *seal.Secret
+	}{
+		{"with_prefix_allowlist", &seal.Secret{AllowedPathPrefixes: []string{"/v1/charges"}}},
+		{"with_pattern_allowlist", &seal.Secret{AllowedPathPattern: ".*"}},
+		{"no_path_allowlist_at_all", &seal.Secret{}},
+	}
+	bad := []string{
+		"/v1/charges/../admin",
+		"/v1/charges/../../admin",
+		"/v1/charges/./list",
+		"/v1/charges/..",
+		"/..",
+		"/./",
+		"..",
+	}
+	for _, c := range cases {
+		for _, p := range bad {
+			if err := validatePath(p, c.s); err == nil {
+				t.Errorf("[%s] validatePath(%q) must reject dot segment, got nil", c.name, p)
+			}
+		}
+	}
+}
+
+// TestValidatePath_percentDecodedTraversal demonstrates that the proxy guard
+// must run on url.URL.Path (post-decode), not on the raw header string.
+// %2e%2e/%2E%2E should both surface as ".." after parsing and be refused.
+func TestValidatePath_percentDecodedTraversal(t *testing.T) {
+	for _, raw := range []string{
+		"https://api.example.com/v1/charges/%2e%2e/admin",
+		"https://api.example.com/v1/charges/%2E%2E/admin",
+	} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		s := &seal.Secret{AllowedPathPrefixes: []string{"/v1/charges"}}
+		if err := validatePath(u.Path, s); err == nil {
+			t.Errorf("percent-encoded traversal %q must be rejected (decoded path = %q)", raw, u.Path)
+		}
+	}
+}
+
+func TestValidateHost_caseSensitive(t *testing.T) {
+	s := &seal.Secret{AllowedHosts: []string{"api.stripe.com"}}
+	for _, mismatch := range []string{"API.stripe.com", "api.STRIPE.com", "Api.Stripe.Com"} {
+		if err := validateHost(mismatch, s); err == nil {
+			t.Errorf("expected case-sensitive reject for %q (spec §2.6)", mismatch)
+		}
+	}
+}
+
+func TestResolveProcessor_acceptedHeaderName(t *testing.T) {
+	ih := &seal.InjectHeader{Token: "tok", AllowedHeaderNames: []string{"X-API-Key"}}
+	format, hn, err := resolveProcessor(ih, map[string]any{"header_name": "X-API-Key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hn != "X-API-Key" || format != "Bearer %s" {
+		t.Fatalf("got header=%q format=%q", hn, format)
+	}
+}
+
+func TestResolveProcessor_rejectedHeaderName(t *testing.T) {
+	ih := &seal.InjectHeader{Token: "tok", AllowedHeaderNames: []string{"X-API-Key"}}
+	if _, _, err := resolveProcessor(ih, map[string]any{"header_name": "Authorization"}); err == nil {
+		t.Fatal("expected reject for header_name outside allowed_header_names")
+	}
+}
+
+func TestResolveProcessor_headerNameAlreadySet(t *testing.T) {
+	ih := &seal.InjectHeader{Token: "tok", HeaderName: "Authorization", AllowedHeaderNames: []string{"X-Custom"}}
+	if _, _, err := resolveProcessor(ih, map[string]any{"header_name": "X-Custom"}); err == nil {
+		t.Fatal("expected reject when seal already pinned header_name")
+	}
+}
+
+func TestResolveProcessor_overrideValueTypeRejected(t *testing.T) {
+	ih := &seal.InjectHeader{Token: "tok", AllowedFormats: []string{"%s"}}
+	if _, _, err := resolveProcessor(ih, map[string]any{"format": 42}); err == nil {
+		t.Fatal("non-string override value must be rejected")
 	}
 }
 
