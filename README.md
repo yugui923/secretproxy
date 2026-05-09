@@ -6,6 +6,20 @@ Wire protocol is a normal relative-URL POST (`POST /v1/forward` with `X-Upstream
 
 Full design in [`docs/specs/2026-05-08-secret-proxy.md`](docs/specs/2026-05-08-secret-proxy.md): threat model (§1.3), wire protocol (§3.1), out-of-scope at v1 (§5.2).
 
+## Architecture
+
+Two diagrams cover the system end-to-end.
+
+**Runtime forward path** — client transport rewrites every outbound vendor request to `POST /v1/forward`, the proxy unseals in-process, validates host/path/method, injects the `Authorization` header, and forwards over TLS. Stateless.
+
+![Runtime forward path](docs/architecture-runtime.svg)
+
+**Sealing flow** — one-time per `(application, vendor credential)` pair. Operator generates a Curve25519 keypair, runs `secret-proxy seal` against the published public key, and ships the base64 blob to the client app as `SEALED_SECRET`.
+
+![Sealing flow](docs/architecture-sealing.svg)
+
+Mermaid sources: [`docs/architecture-runtime.mmd`](docs/architecture-runtime.mmd), [`docs/architecture-sealing.mmd`](docs/architecture-sealing.mmd). Regenerate with [`./docs/render-diagrams.sh`](docs/render-diagrams.sh).
+
 ## Server quickstart
 
 Requires Go 1.25+. For Render or another PaaS, see the [Render](#render) section.

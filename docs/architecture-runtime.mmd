@@ -1,0 +1,27 @@
+%% Source for docs/architecture-runtime.svg
+%% Regenerate with: ./docs/render-diagrams.sh
+flowchart LR
+    Code["App code"] --> Transport["pkg/client<br/>RoundTripper"]
+    Transport -->|"POST /v1/forward<br/>X-Upstream-URL<br/>X-Sealed-Secret<br/>X-Auth-Bearer"| Edge["TLS terminator<br/>(PaaS edge or bundled)"]
+    Edge --> Forward[/"/v1/forward handler"/]
+
+    subgraph Proxy["secret-proxy (stateless)"]
+        direction TB
+        Forward --> Unseal["seal.Open<br/>NaCl box"]
+        Unseal --> Validate["Validate<br/>host • path • method"]
+        Validate --> Inject["inject_header<br/>set Authorization"]
+        Inject --> Egress{"Egress guard<br/>private-IP + self-loop"}
+        PrivKey[("Curve25519<br/>private key")] -.->|reads| Unseal
+    end
+
+    Egress -->|"HTTPS"| Vendor["Vendor API<br/>(Stripe, Twilio, OpenAI...)"]
+    Vendor -.->|"streamed response"| Egress
+
+    classDef store fill:#fef3c7,stroke:#92400e,color:#78350f
+    classDef external fill:#e0e7ff,stroke:#3730a3,color:#1e1b4b
+    classDef guard fill:#fee2e2,stroke:#991b1b,color:#7f1d1d
+    classDef edge fill:#ecfdf5,stroke:#047857,color:#064e3b
+    class PrivKey store
+    class Code,Transport,Vendor external
+    class Egress guard
+    class Edge edge
