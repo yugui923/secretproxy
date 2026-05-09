@@ -1,0 +1,245 @@
+// Package seal implements the sealed-secret envelope (NaCl box) and the
+// validation rules from §2.1–§2.6 of the design spec.
+package seal
+
+import (
+	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"strings"
+
+	"golang.org/x/crypto/curve25519"
+	"golang.org/x/crypto/nacl/box"
+)
+
+const KeyLen = 32
+
+// PrivateKey is the 32-byte Curve25519 private key held only by the proxy.
+type PrivateKey [KeyLen]byte
+
+// PublicKey is the 32-byte Curve25519 public key derived from a private key.
+type PublicKey [KeyLen]byte
+
+func (k PrivateKey) Hex() string { return hex.EncodeToString(k[:]) }
+func (k PublicKey) Hex() string  { return hex.EncodeToString(k[:]) }
+
+// Public returns the public key derived from priv.
+func (priv PrivateKey) Public() PublicKey {
+	var out [32]byte
+	in := [32]byte(priv)
+	curve25519.ScalarBaseMult(&out, &in)
+	return PublicKey(out)
+}
+
+func GenerateKeypair() (PublicKey, PrivateKey, error) {
+	pub, priv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		return PublicKey{}, PrivateKey{}, err
+	}
+	return PublicKey(*pub), PrivateKey(*priv), nil
+}
+
+func ParsePrivateKey(s string) (PrivateKey, error) {
+	raw, err := hex.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return PrivateKey{}, fmt.Errorf("seal: invalid hex private key: %w", err)
+	}
+	if len(raw) != KeyLen {
+		return PrivateKey{}, fmt.Errorf("seal: private key must be %d bytes, got %d", KeyLen, len(raw))
+	}
+	var k PrivateKey
+	copy(k[:], raw)
+	return k, nil
+}
+
+func ParsePublicKey(s string) (PublicKey, error) {
+	raw, err := hex.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return PublicKey{}, fmt.Errorf("seal: invalid hex public key: %w", err)
+	}
+	if len(raw) != KeyLen {
+		return PublicKey{}, fmt.Errorf("seal: public key must be %d bytes, got %d", KeyLen, len(raw))
+	}
+	var k PublicKey
+	copy(k[:], raw)
+	return k, nil
+}
+
+func ReadPrivateKeyFile(path string) (PrivateKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return PrivateKey{}, err
+	}
+	return ParsePrivateKey(string(data))
+}
+
+type Secret struct {
+	BearerAuth   *BearerAuth   `json:"bearer_auth,omitempty"`
+	NoAuth       *NoAuth       `json:"no_auth,omitempty"`
+	InjectHeader *InjectHeader `json:"inject_header,omitempty"`
+
+	AllowedHosts        []string `json:"allowed_hosts,omitempty"`
+	AllowedHostPattern  string   `json:"allowed_host_pattern,omitempty"`
+	AllowedPathPrefixes []string `json:"allowed_path_prefixes,omitempty"`
+	AllowedPathPattern  string   `json:"allowed_path_pattern,omitempty"`
+	AllowedMethods      []string `json:"allowed_methods,omitempty"`
+}
+
+type BearerAuth struct {
+	Digest string `json:"digest"`
+}
+
+type NoAuth struct{}
+
+type InjectHeader struct {
+	Token              string   `json:"token"`
+	Format             string   `json:"format,omitempty"`
+	HeaderName         string   `json:"header_name,omitempty"`
+	AllowedFormats     []string `json:"allowed_formats,omitempty"`
+	AllowedHeaderNames []string `json:"allowed_header_names,omitempty"`
+}
+
+func (s *Secret) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("auth", s.AuthKind()),
+		slog.String("processor", s.ProcessorKind()),
+		slog.Any("allowed_hosts", s.AllowedHosts),
+	)
+}
+
+func (s *Secret) AuthKind() string {
+	switch {
+	case s.BearerAuth != nil:
+		return "bearer_auth"
+	case s.NoAuth != nil:
+		return "no_auth"
+	}
+	return "none"
+}
+
+func (s *Secret) ProcessorKind() string {
+	if s.InjectHeader != nil {
+		return "inject_header"
+	}
+	return "none"
+}
+
+func (s *Secret) Validate() error {
+	auths := 0
+	if s.BearerAuth != nil {
+		auths++
+	}
+	if s.NoAuth != nil {
+		auths++
+	}
+	if auths != 1 {
+		return fmt.Errorf("seal: exactly one auth tag required, got %d", auths)
+	}
+	procs := 0
+	if s.InjectHeader != nil {
+		procs++
+	}
+	if procs != 1 {
+		return fmt.Errorf("seal: exactly one processor tag required, got %d", procs)
+	}
+	if s.AllowedHostPattern != "" && len(s.AllowedHosts) > 0 {
+		return errors.New("seal: allowed_hosts and allowed_host_pattern are mutually exclusive")
+	}
+	if s.AllowedHostPattern == "" && len(s.AllowedHosts) == 0 {
+		return errors.New("seal: host allowlist is required")
+	}
+	if s.AllowedPathPattern != "" && len(s.AllowedPathPrefixes) > 0 {
+		return errors.New("seal: allowed_path_prefixes and allowed_path_pattern are mutually exclusive")
+	}
+	if s.BearerAuth != nil && s.BearerAuth.Digest == "" {
+		return errors.New("seal: bearer_auth.digest required")
+	}
+	if s.InjectHeader != nil && s.InjectHeader.Token == "" {
+		return errors.New("seal: inject_header.token required")
+	}
+	return nil
+}
+
+// VerifyBearer compares a presented bearer against the sealed digest in
+// constant time. Decoding the digest first guarantees the byte-comparison sees
+// equal-length inputs even if a future digest format changes.
+func (b *BearerAuth) VerifyBearer(presented string) bool {
+	got := sha256.Sum256([]byte(presented))
+	want, err := base64.StdEncoding.DecodeString(b.Digest)
+	if err != nil || len(want) != sha256.Size {
+		return false
+	}
+	return subtle.ConstantTimeCompare(got[:], want) == 1
+}
+
+func HashBearer(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func Seal(s *Secret, pub PublicKey) (string, error) {
+	if err := s.Validate(); err != nil {
+		return "", err
+	}
+	body, err := json.Marshal(s)
+	if err != nil {
+		return "", err
+	}
+	pubArr := [32]byte(pub)
+	sealed, err := box.SealAnonymous(nil, body, &pubArr, rand.Reader)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(sealed), nil
+}
+
+// Open decodes and decrypts a sealed blob. Tries the primary key first, then
+// each fallback in order. Returns usedFallback=true when a non-primary key
+// succeeded — operators wire this to a metric so rotation progress is visible
+// (per the §4.4 zero-downtime rotation runbook).
+//
+// Unknown JSON fields are rejected at unmarshal time, matching §2.2's
+// "marshaling rejects unknown tags" promise.
+func Open(blob string, priv PrivateKey, fallback ...PrivateKey) (*Secret, bool, error) {
+	raw, err := base64.StdEncoding.DecodeString(blob)
+	if err != nil {
+		return nil, false, fmt.Errorf("seal: base64 decode: %w", err)
+	}
+	plain, ok := tryOpen(raw, priv)
+	usedFallback := false
+	if !ok {
+		for _, fb := range fallback {
+			if plain, ok = tryOpen(raw, fb); ok {
+				usedFallback = true
+				break
+			}
+		}
+	}
+	if !ok {
+		return nil, false, errors.New("seal: decryption failed")
+	}
+	s := &Secret{}
+	dec := json.NewDecoder(bytes.NewReader(plain))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(s); err != nil {
+		return nil, false, fmt.Errorf("seal: unmarshal: %w", err)
+	}
+	if err := s.Validate(); err != nil {
+		return nil, false, err
+	}
+	return s, usedFallback, nil
+}
+
+func tryOpen(raw []byte, priv PrivateKey) ([]byte, bool) {
+	privArr := [32]byte(priv)
+	pubArr := [32]byte(priv.Public())
+	return box.OpenAnonymous(nil, raw, &pubArr, &privArr)
+}
