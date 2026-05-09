@@ -78,8 +78,10 @@ func parseCIDROrIP(raw string) (netip.Prefix, error) {
 //     the proxy is unreachable except via Cloudflare; the header is not
 //     validated against Cloudflare's IP list. Missing or unparseable values
 //     fail closed.
-//  2. trustTerminator=true → rightmost X-Forwarded-For entry (the hop the
-//     trusted terminator added).
+//  2. trustTerminator=true → rightmost token of the rightmost X-Forwarded-For
+//     header line. HTTP/1.1 allows multiple XFF lines and Go preserves them
+//     in receive order; the most recently appended line is what the trusted
+//     terminator wrote. A present-but-empty rightmost token fails closed.
 //  3. Otherwise → the TCP peer address.
 //
 // See §5.1 footgun #9.
