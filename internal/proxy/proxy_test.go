@@ -400,6 +400,26 @@ func TestHandler_health(t *testing.T) {
 	}
 }
 
+// TestHandler_panicsWithoutPrivateKey locks in fail-fast behavior: a Server
+// constructed without PrivateKey must panic at the first Handler() call so the
+// misconfiguration surfaces at startup rather than as a runtime nil-deref on
+// the first request to /public-key (while /healthz keeps replying OK and
+// observers think the box is fine).
+func TestHandler_panicsWithoutPrivateKey(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when PrivateKey is nil")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "PrivateKey is nil") {
+			t.Fatalf("panic message should mention nil PrivateKey, got %v", r)
+		}
+	}()
+	s := &Server{Logger: discardLogger()}
+	_ = s.Handler()
+}
+
 func TestHandler_unknownPath404(t *testing.T) {
 	_, priv, _ := seal.GenerateKeypair()
 	s := &Server{PrivateKey: &priv, Logger: discardLogger()}

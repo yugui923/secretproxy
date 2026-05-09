@@ -111,6 +111,13 @@ func (s *Server) init() {
 }
 
 func (s *Server) Handler() http.Handler {
+	// Fail fast on misconfiguration at the real entry point. Without this,
+	// /healthz keeps replying OK while /public-key panics on first request,
+	// so an observer wiring readiness off /healthz never learns the box is
+	// broken. handleForward's seal.Open call also nil-derefs s.PrivateKey.
+	if s.PrivateKey == nil {
+		panic("proxy: Server.PrivateKey is nil; cannot serve")
+	}
 	s.init()
 	return http.HandlerFunc(s.serve)
 }
