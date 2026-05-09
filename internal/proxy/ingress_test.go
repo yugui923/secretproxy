@@ -85,6 +85,23 @@ func TestClientIPFromRequest_xffIgnoredWhenUntrusted(t *testing.T) {
 	}
 }
 
+// TestClientIPFromRequest_xffTrailingCommaFailsClosed prevents a regression
+// where "1.2.3.4, " (trailing comma — common from misconfigured terminators)
+// used to fall through to RemoteAddr. Behind a terminator RemoteAddr is the
+// terminator itself, almost always inside the operator's allowlist — net
+// effect was silent allow of an unknown source.
+func TestClientIPFromRequest_xffTrailingCommaFailsClosed(t *testing.T) {
+	for _, xff := range []string{"1.2.3.4, ", "1.2.3.4,", "1.2.3.4,   ", " "} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
+		req.RemoteAddr = "10.0.0.1:443" // terminator addr — would sit inside the allowlist
+		req.Header.Set("X-Forwarded-For", xff)
+		_, err := clientIPFromRequest(req, true, false)
+		if err == nil {
+			t.Errorf("xff %q: expected error (must fail closed), got nil", xff)
+		}
+	}
+}
+
 func TestClientIPFromRequest_ipv4MappedNormalized(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
 	req.RemoteAddr = "[::ffff:203.0.113.7]:51000"

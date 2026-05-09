@@ -95,9 +95,15 @@ func clientIPFromRequest(r *http.Request, trustTerminator, trustCloudflare bool)
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
 			candidate := strings.TrimSpace(parts[len(parts)-1])
-			if candidate != "" {
-				return parseIPMaybePort(candidate)
+			if candidate == "" {
+				// "1.2.3.4, " (trailing comma — common from misconfigured
+				// terminators) used to fall through to RemoteAddr, which
+				// behind a terminator is the terminator itself and almost
+				// always sits inside the operator's allowlist. Net effect:
+				// silent allow of an unknown source. Fail closed instead.
+				return netip.Addr{}, errors.New("x-forwarded-for present but rightmost entry is empty")
 			}
+			return parseIPMaybePort(candidate)
 		}
 	}
 	return parseIPMaybePort(r.RemoteAddr)
