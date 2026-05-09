@@ -2,6 +2,7 @@ package seal
 
 import (
 	"encoding/base64"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -191,6 +192,68 @@ func TestParsePrivateKey_lengthMismatch(t *testing.T) {
 func TestParsePrivateKey_invalidHex(t *testing.T) {
 	if _, err := ParsePrivateKey(strings.Repeat("zz", 32)); err == nil {
 		t.Fatal("expected hex parse error")
+	}
+}
+
+var uuidV4Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+func TestSeal_autoGeneratesEUID(t *testing.T) {
+	pub, priv, _ := GenerateKeypair()
+	in := validSecret()
+	if in.EUID != "" {
+		t.Fatal("test fixture should start without EUID")
+	}
+	blob, err := Seal(in, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !uuidV4Pattern.MatchString(in.EUID) {
+		t.Fatalf("Seal did not stamp UUIDv4 EUID, got %q", in.EUID)
+	}
+	got, _, err := Open(blob, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EUID != in.EUID {
+		t.Fatalf("EUID round-trip mismatch: %q vs %q", got.EUID, in.EUID)
+	}
+}
+
+func TestSeal_preservesProvidedEUIDAndName(t *testing.T) {
+	pub, priv, _ := GenerateKeypair()
+	in := validSecret()
+	in.EUID = "fixed-euid-for-test"
+	in.Name = "stripe-prod-charges"
+	blob, err := Seal(in, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.EUID != "fixed-euid-for-test" {
+		t.Fatalf("Seal overwrote provided EUID: %q", in.EUID)
+	}
+	got, _, err := Open(blob, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "stripe-prod-charges" || got.EUID != "fixed-euid-for-test" {
+		t.Fatalf("name/euid round-trip mismatch: %+v", got)
+	}
+}
+
+func TestNewEUID_uniquePerCall(t *testing.T) {
+	seen := map[string]struct{}{}
+	for range 64 {
+		id, err := NewEUID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !uuidV4Pattern.MatchString(id) {
+			t.Fatalf("not a UUIDv4: %q", id)
+		}
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate EUID: %q", id)
+		}
+		seen[id] = struct{}{}
 	}
 }
 

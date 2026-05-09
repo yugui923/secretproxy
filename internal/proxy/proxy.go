@@ -186,7 +186,12 @@ func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, r, http.StatusUnauthorized, "seal open failed", err, start, logFields)
 		return
 	}
-	logFields = append(logFields, "auth", secret.AuthKind(), "processor", secret.ProcessorKind())
+	logFields = append(logFields,
+		"auth", secret.AuthKind(),
+		"processor", secret.ProcessorKind(),
+		"seal_euid", secret.EUID,
+		"seal_name", secret.Name,
+	)
 	if usedFallback {
 		s.Logger.Warn("seal_opened_via_previous_key", logFields...)
 	}

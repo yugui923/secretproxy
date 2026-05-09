@@ -231,6 +231,8 @@ func runSeal(args []string) error {
 	allowedHeaderName := fs.String("allowed-header-name", "", "Comma-separated allowed_header_names")
 	publicKey := fs.String("public-key", "", "Hex public key")
 	publicKeyURL := fs.String("public-key-url", "", "URL serving the public key as text/plain hex (must be https://)")
+	name := fs.String("name", "", "Optional human label for this sealed credential (logged on every request)")
+	euid := fs.String("euid", "", "Per-seal identifier (random UUIDv4 generated when empty; logged on every request)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -263,6 +265,8 @@ func runSeal(args []string) error {
 		AllowedPathPrefixes: splitCSV(*allowPathPrefix),
 		AllowedPathPattern:  *allowPathPattern,
 		AllowedMethods:      splitCSV(*allowMethod),
+		Name:                *name,
+		EUID:                *euid,
 	}
 	switch {
 	case *noAuth:
@@ -276,6 +280,10 @@ func runSeal(args []string) error {
 	blob, err := seal.Seal(s, pub)
 	if err != nil {
 		return err
+	}
+	fmt.Fprintf(os.Stderr, "euid: %s\n", s.EUID)
+	if s.Name != "" {
+		fmt.Fprintf(os.Stderr, "name: %s\n", s.Name)
 	}
 	fmt.Println(blob)
 	return nil

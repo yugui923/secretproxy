@@ -59,10 +59,18 @@ NaCl sealed box (`golang.org/x/crypto/nacl/box`) — Curve25519 + XSalsa20-Poly1
   "allowed_hosts": ["api.stripe.com"], // required: host or host_pattern
   "allowed_path_prefixes": ["/v1/charges", "/v1/refunds"], // optional: prefix or pattern
   "allowed_methods": ["POST"], // optional
+  "name": "stripe-prod-charges", // optional human label, surfaced in logs
+  "euid": "f47ac10b-58cc-4372-a567-0e02b2c3d479", // UUIDv4, auto-stamped by Seal() when empty
 }
 ```
 
 Marshaling rejects: more than one auth tag, more than one processor tag, both host fields, both path fields, unknown tags.
+
+`name` and `euid` are observability-only — they participate in no validation or
+authorization decisions. `euid` is generated with `crypto/rand` UUIDv4 at seal
+time (or accepted from `--euid` for tests/imports); the proxy logs both on every
+request so an operator can correlate upstream calls back to a sealed credential
+without ever logging the secret itself.
 
 ### 2.3 Authorizers
 
@@ -154,22 +162,22 @@ Env vars and CLI flags (flag wins). All env vars are `SECRET_PROXY_*` prefixed. 
 
 The Curve25519 private key resolves in this order: `--private-key-file` → `--private-key` → `SECRET_PROXY_PRIVATE_KEY_FILE` → `SECRET_PROXY_PRIVATE_KEY`. File-mount paths are preferred in production; the inline form is a dev fallback. The previous private key (rotation) follows the same order. TLS cert and key are file-mount only.
 
-| Env                                      | Flag                          | Type                          | Default                                          | Purpose                                                             |
-| ---------------------------------------- | ----------------------------- | ----------------------------- | ------------------------------------------------ | ------------------------------------------------------------------- |
-| `SECRET_PROXY_PRIVATE_KEY_FILE`          | `--private-key-file`          | path                          | required¹                                        | PEM/hex file holding the Curve25519 private key. Preferred.         |
-| `SECRET_PROXY_PRIVATE_KEY`               | `--private-key`               | hex (32 B)                    | required¹                                        | Curve25519 private key inline. Dev fallback / PaaS-only.            |
-| `SECRET_PROXY_PREVIOUS_PRIVATE_KEY_FILE` | `--previous-private-key-file` | path                          | empty                                            | Optional second private key tried during rotation (§4.4).           |
-| `SECRET_PROXY_PREVIOUS_PRIVATE_KEY`      | `--previous-private-key`      | hex (32 B)                    | empty                                            | Inline form of the previous key (PaaS / env-only secret stores).    |
-| `SECRET_PROXY_TLS_CERT_FILE`             | `--tls-cert-file`             | path                          | required²                                        | PEM cert chain for the HTTPS listener.                              |
-| `SECRET_PROXY_TLS_KEY_FILE`              | `--tls-key-file`              | path                          | required²                                        | PEM private key for the HTTPS listener.                             |
-| `SECRET_PROXY_TRUST_TLS_TERMINATOR`      | `--trust-tls-terminator`      | bool                          | `false`                                          | Listen plaintext (PaaS edge / mesh / ingress terminates TLS). §3.2. |
-| `SECRET_PROXY_LISTEN_ADDRESS`            | `--listen-address`            | host:port                     | `:$PORT` if set, else `:8443`                    | Bind address. PaaS platforms inject `PORT`.                         |
-| `SECRET_PROXY_FILTERED_HEADERS`          | `--filtered-headers`          | comma list                    | empty                                            | Extra headers to strip.                                             |
-| `SECRET_PROXY_ALLOW_PASSTHROUGH`         | `--allow-passthrough`         | bool                          | `false`                                          | Forward requests without a sealed secret.                           |
-| `SECRET_PROXY_SELF_HOSTNAMES`            | `--self-hostnames`            | comma list                    | auto: `localhost`, loopback IPs, `os.Hostname()` | Loop guard. User values merged with auto-detected set.              |
-| `SECRET_PROXY_ALLOW_NO_AUTH`             | `--allow-no-auth`             | bool                          | `false`                                          | Permit `no_auth` sealed secrets.                                    |
-| `SECRET_PROXY_ALLOWED_CLIENT_CIDRS`      | `--allowed-client-cidrs`      | comma list of CIDR / IP       | empty (off)                                      | Ingress IP allowlist on `/v1/forward`. See §5.2 and §5.1 footgun #9.|
-| `SECRET_PROXY_LOG_LEVEL`                 | `--log-level`                 | `debug`/`info`/`warn`/`error` | `info`                                           | Log level. `debug` also enables verbose proxy-internal logging.     |
+| Env                                      | Flag                          | Type                          | Default                                          | Purpose                                                              |
+| ---------------------------------------- | ----------------------------- | ----------------------------- | ------------------------------------------------ | -------------------------------------------------------------------- |
+| `SECRET_PROXY_PRIVATE_KEY_FILE`          | `--private-key-file`          | path                          | required¹                                        | PEM/hex file holding the Curve25519 private key. Preferred.          |
+| `SECRET_PROXY_PRIVATE_KEY`               | `--private-key`               | hex (32 B)                    | required¹                                        | Curve25519 private key inline. Dev fallback / PaaS-only.             |
+| `SECRET_PROXY_PREVIOUS_PRIVATE_KEY_FILE` | `--previous-private-key-file` | path                          | empty                                            | Optional second private key tried during rotation (§4.4).            |
+| `SECRET_PROXY_PREVIOUS_PRIVATE_KEY`      | `--previous-private-key`      | hex (32 B)                    | empty                                            | Inline form of the previous key (PaaS / env-only secret stores).     |
+| `SECRET_PROXY_TLS_CERT_FILE`             | `--tls-cert-file`             | path                          | required²                                        | PEM cert chain for the HTTPS listener.                               |
+| `SECRET_PROXY_TLS_KEY_FILE`              | `--tls-key-file`              | path                          | required²                                        | PEM private key for the HTTPS listener.                              |
+| `SECRET_PROXY_TRUST_TLS_TERMINATOR`      | `--trust-tls-terminator`      | bool                          | `false`                                          | Listen plaintext (PaaS edge / mesh / ingress terminates TLS). §3.2.  |
+| `SECRET_PROXY_LISTEN_ADDRESS`            | `--listen-address`            | host:port                     | `:$PORT` if set, else `:8443`                    | Bind address. PaaS platforms inject `PORT`.                          |
+| `SECRET_PROXY_FILTERED_HEADERS`          | `--filtered-headers`          | comma list                    | empty                                            | Extra headers to strip.                                              |
+| `SECRET_PROXY_ALLOW_PASSTHROUGH`         | `--allow-passthrough`         | bool                          | `false`                                          | Forward requests without a sealed secret.                            |
+| `SECRET_PROXY_SELF_HOSTNAMES`            | `--self-hostnames`            | comma list                    | auto: `localhost`, loopback IPs, `os.Hostname()` | Loop guard. User values merged with auto-detected set.               |
+| `SECRET_PROXY_ALLOW_NO_AUTH`             | `--allow-no-auth`             | bool                          | `false`                                          | Permit `no_auth` sealed secrets.                                     |
+| `SECRET_PROXY_ALLOWED_CLIENT_CIDRS`      | `--allowed-client-cidrs`      | comma list of CIDR / IP       | empty (off)                                      | Ingress IP allowlist on `/v1/forward`. See §5.2 and §5.1 footgun #9. |
+| `SECRET_PROXY_LOG_LEVEL`                 | `--log-level`                 | `debug`/`info`/`warn`/`error` | `info`                                           | Log level. `debug` also enables verbose proxy-internal logging.      |
 
 ¹ Exactly one of the four private-key sources is required. TLS 1.3 is enforced at the listener; there is no version-downgrade flag.
 ² Required unless `SECRET_PROXY_TRUST_TLS_TERMINATOR=1`, in which case the proxy listens plaintext on `--listen-address` and trusts the upstream terminator.
@@ -196,13 +204,13 @@ Seal-time flag categories:
 
 - **Required:** `--token`; one of `--auth-bearer` / `--no-auth`; one of `--allow-host` / `--allow-host-pattern`; public key (via `--public-key`, `--public-key-url`, or `SECRET_PROXY_PUBLIC_KEY`).
 - **Defaulted:** `--processor` → `inject-header`; `--format` → `"Bearer %s"`; `--header-name` → `"Authorization"`.
-- **Optional:** `--allowed-format`, `--allowed-header-name`, `--allow-path-prefix` / `--allow-path-pattern`, `--allow-method`.
+- **Optional:** `--allowed-format`, `--allowed-header-name`, `--allow-path-prefix` / `--allow-path-pattern`, `--allow-method`, `--name`, `--euid` (random UUIDv4 generated when omitted).
 
 Go client library at `pkg/client`: `NewTransport(proxyURL, WithSealedSecret(blob), WithAuth(token))` returns an `http.RoundTripper` that retargets every request to `proxyURL/v1/forward`, copies the original URL into `X-Upstream-URL`, and adds `X-Sealed-Secret` and `X-Auth-Bearer`. Method, body, and remaining headers pass through. `WithProxyTLS(*tls.Config)` overrides the default TLS config for the proxy hop (e.g. to trust a dev CA).
 
 ### 4.3 Observability
 
-Structured JSON logs, one line per request: `source`, `method`, `host`, `path`, `query_keys` (keys only), `status`, `dur_ms`, `bytes_in`, `bytes_out`, `processor`, `auth`, `error`. Never log tokens, digests, or keys.
+Structured JSON logs, one line per request: `source`, `method`, `host`, `path`, `query_keys` (keys only), `status`, `dur_ms`, `bytes_in`, `bytes_out`, `processor`, `auth`, `seal_euid`, `seal_name`, `error`. `seal_euid` is the per-seal UUIDv4 stamped at seal time; `seal_name` is the operator-supplied label (empty if `--name` was not used). Never log tokens, digests, or keys.
 
 `Redact` invariant: every credential/key/digest field implements `MarshalJSON → "REDACTED"`; the `Secret` struct is never logged whole.
 
