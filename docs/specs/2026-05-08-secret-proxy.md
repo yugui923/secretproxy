@@ -124,37 +124,39 @@ Override only `format` and `header_name`, only within `allowed_formats` / `allow
 
 ## 12. Server Configuration
 
-Env vars and CLI flags (flag wins). All env vars are `SECRET_PROXY_*` prefixed.
+Env vars and CLI flags (flag wins). All env vars are `SECRET_PROXY_*` prefixed. **Only `SECRET_PROXY_PRIVATE_KEY` is required to start; everything else has a safe default.**
 
-| Env                              | Flag                  | Type       | Default  | Purpose                                   |
-| -------------------------------- | --------------------- | ---------- | -------- | ----------------------------------------- |
-| `SECRET_PROXY_PRIVATE_KEY`       | `--private-key`       | hex (32 B) | required | Curve25519 private key.                   |
-| `SECRET_PROXY_LISTEN_ADDRESS`    | `--listen-address`    | host:port  | `:8080`  | Bind address.                             |
-| `SECRET_PROXY_FILTERED_HEADERS`  | `--filtered-headers`  | comma list | empty    | Extra headers to strip.                   |
-| `SECRET_PROXY_ALLOW_PASSTHROUGH` | `--allow-passthrough` | bool       | `false`  | Forward requests without a sealed secret. |
-| `SECRET_PROXY_SELF_HOSTNAMES`    | `--self-hostnames`    | comma list | empty    | Self-loop guard.                          |
-| `SECRET_PROXY_ALLOW_NO_AUTH`     | `--allow-no-auth`     | bool       | `false`  | Permit `no_auth` sealed secrets.          |
-| `SECRET_PROXY_LOG_LEVEL`         | `--log-level`         | enum       | `info`   |                                           |
-| `SECRET_PROXY_DEBUG`             | `--debug`             | bool       | `false`  | Verbose proxy logging.                    |
+| Env                              | Flag                  | Type                          | Default                                          | Purpose                                                         |
+| -------------------------------- | --------------------- | ----------------------------- | ------------------------------------------------ | --------------------------------------------------------------- |
+| `SECRET_PROXY_PRIVATE_KEY`       | `--private-key`       | hex (32 B)                    | required                                         | Curve25519 private key.                                         |
+| `SECRET_PROXY_LISTEN_ADDRESS`    | `--listen-address`    | host:port                     | `:8080`                                          | Bind address.                                                   |
+| `SECRET_PROXY_FILTERED_HEADERS`  | `--filtered-headers`  | comma list                    | empty                                            | Extra headers to strip.                                         |
+| `SECRET_PROXY_ALLOW_PASSTHROUGH` | `--allow-passthrough` | bool                          | `false`                                          | Forward requests without a sealed secret.                       |
+| `SECRET_PROXY_SELF_HOSTNAMES`    | `--self-hostnames`    | comma list                    | auto: `localhost`, loopback IPs, `os.Hostname()` | Loop guard. User values merged with auto-detected set.          |
+| `SECRET_PROXY_ALLOW_NO_AUTH`     | `--allow-no-auth`     | bool                          | `false`                                          | Permit `no_auth` sealed secrets.                                |
+| `SECRET_PROXY_LOG_LEVEL`         | `--log-level`         | `debug`/`info`/`warn`/`error` | `info`                                           | Log level. `debug` also enables verbose proxy-internal logging. |
 
 ## 13. CLI
 
 Single `secret-proxy` binary, multiple subcommands:
 
-- **`serve`** — runs the daemon.
-- **`seal`** — seals a credential. Public key from `--public-key`, `--public-key-url`, or `SECRET_PROXY_PUBLIC_KEY`. Outputs base64 to stdout.
-- **`unseal`** — debug; needs the private key.
-- **`request`** — test wrapper that issues a proxied request.
+- **`serve`** — runs the daemon. With `SECRET_PROXY_PRIVATE_KEY` set, takes no flags.
+- **`seal`** — seals a credential. Public key resolved from `--public-key`, `--public-key-url`, or `SECRET_PROXY_PUBLIC_KEY` env (in that order). Outputs base64 to stdout.
+- **`unseal`** — debug; reads `SECRET_PROXY_PRIVATE_KEY` from env, sealed secret from stdin or `--token`.
+- **`request`** — test wrapper. Defaults: `--proxy-url` to `http://localhost:8080`; sealed secret from `SEALED_SECRET` env; bearer token from `AUTH_TOKEN` env.
 
 ```
-secret-proxy seal --processor inject-header                                   \
-  --token "$STRIPE_LIVE_KEY" --format "Bearer %s" --header-name Authorization  \
-  --auth-bearer "$CLIENT_TOKEN" --allow-host api.stripe.com                    \
-  --allow-path-prefix /v1/charges --allow-method POST                          \
-  --public-key-url https://secret-proxy.example.com/public-key
+SECRET_PROXY_PUBLIC_KEY=$(curl -s http://secret-proxy/public-key) \
+  secret-proxy seal \
+    --token "$STRIPE_LIVE_KEY" --auth-bearer "$CLIENT_TOKEN" \
+    --allow-host api.stripe.com --allow-path-prefix /v1/charges --allow-method POST
 ```
 
-Seal-time flags: `--token`, `--format`, `--header-name`, `--allowed-format`, `--allowed-header-name`, `--auth-bearer` / `--no-auth`, `--allow-host` / `--allow-host-pattern`, `--allow-path-prefix` / `--allow-path-pattern`, `--allow-method`.
+Seal-time flag categories:
+
+- **Required:** `--token`; one of `--auth-bearer` / `--no-auth`; one of `--allow-host` / `--allow-host-pattern`; public key (via `--public-key`, `--public-key-url`, or `SECRET_PROXY_PUBLIC_KEY`).
+- **Defaulted:** `--processor` → `inject-header`; `--format` → `"Bearer %s"`; `--header-name` → `"Authorization"`.
+- **Optional:** `--allowed-format`, `--allowed-header-name`, `--allow-path-prefix` / `--allow-path-pattern`, `--allow-method`.
 
 Go client library at `pkg/client`: `NewTransport(proxyURL, WithSealedSecret(blob), WithAuth(token))` returns an `http.RoundTripper` that injects headers and rewrites `https://` → `http://`.
 
@@ -186,7 +188,7 @@ Key rotation: generate keypair → re-seal (CLI fetches new public key via `--pu
 
 1. **Plaintext client→proxy hop.** Without a fronting TLS terminator, sealed secrets and bearer tokens cross the wire in cleartext.
 2. **No replay protection.** A captured `(sealed-secret, bearer)` pair is reusable indefinitely. Mitigation: rotate seals on suspected leak.
-3. **Loop guard depends on `SECRET_PROXY_SELF_HOSTNAMES`.** Always set it.
+3. **Loop guard auto-detects local hostnames and IPs.** Add CNAMEs or LB-fronted hostnames to `SECRET_PROXY_SELF_HOSTNAMES` if the proxy can be reached under them.
 4. **Trust-anchor headers must be filtered.** Any header the proxy itself trusts (`X-Forwarded-For`, sidecar identity) must appear in `SECRET_PROXY_FILTERED_HEADERS` or clients can spoof.
 5. **Host allowlist is mandatory in practice** — the CLI refuses to seal without one.
 6. **No body size cap.** Add `--max-request-bytes` if large bodies are observed.
