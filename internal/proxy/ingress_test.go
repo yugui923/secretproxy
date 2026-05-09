@@ -124,6 +124,42 @@ func TestClientIPFromRequest_xffMultipleHeaderLinesWithChain(t *testing.T) {
 	}
 }
 
+// TestClientIPFromRequest_xffAttackerControlsLastLineFailsClosed locks the rule
+// that an attacker who can inject the LAST XFF line cannot bypass the
+// allowlist by sending it empty/whitespace — the rightmost-of-rightmost rule
+// must still fail closed rather than silently fall back to the previous line
+// or RemoteAddr.
+func TestClientIPFromRequest_xffAttackerControlsLastLineFailsClosed(t *testing.T) {
+	for _, lastLine := range []string{"", " ", "   ,   ", ","} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
+		req.RemoteAddr = "10.0.0.1:443"
+		req.Header.Add("X-Forwarded-For", "203.0.113.7") // legitimate terminator-set
+		req.Header.Add("X-Forwarded-For", lastLine)      // attacker-injected trailing line
+		_, err := clientIPFromRequest(req, true, false)
+		if err == nil {
+			t.Errorf("attacker last line %q: expected fail-closed error, got nil — would have allowed unknown source", lastLine)
+		}
+	}
+}
+
+// TestClientIPFromRequest_xffThreeOrMoreLines pins the rule across more than
+// two header lines (e.g. attacker → terminator → attacker), in case the
+// trust chain becomes more than two hops in a future deployment shape.
+func TestClientIPFromRequest_xffThreeOrMoreLines(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
+	req.RemoteAddr = "10.0.0.1:443"
+	req.Header.Add("X-Forwarded-For", "1.1.1.1")     // earliest hop
+	req.Header.Add("X-Forwarded-For", "2.2.2.2")     // middle hop
+	req.Header.Add("X-Forwarded-For", "203.0.113.7") // last (trustworthy) hop
+	addr, err := clientIPFromRequest(req, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr.String() != "203.0.113.7" {
+		t.Fatalf("want last-line 203.0.113.7, got %s", addr)
+	}
+}
+
 // TestClientIPFromRequest_xffTrailingCommaFailsClosed prevents a regression
 // where "1.2.3.4, " (trailing comma — common from misconfigured terminators)
 // used to fall through to RemoteAddr. Behind a terminator RemoteAddr is the
