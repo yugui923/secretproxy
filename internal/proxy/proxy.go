@@ -69,6 +69,14 @@ var hopByHopHeaders = []string{
 
 var errMissingSecret = errors.New("missing X-Sealed-Secret header")
 
+// ErrEgressRefused is returned by guardedDial when the proxy refuses to dial a
+// host as a matter of policy (self-loop guard or private/loopback/link-local
+// IP). The forwardTo ErrorHandler distinguishes this from genuine upstream
+// failures so SSRF rejects return 403 (and aggregate as a separate signal in
+// dashboards) instead of being bucketed with vendor TLS handshake errors as
+// 502s.
+var ErrEgressRefused = errors.New("egress refused")
+
 type Server struct {
 	PrivateKey         *seal.PrivateKey
 	PreviousPrivateKey *seal.PrivateKey
@@ -296,6 +304,14 @@ func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url
 		Director:  director,
 		Transport: s.Transport,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			if errors.Is(err, ErrEgressRefused) {
+				// Policy refusal — separate signal from upstream availability
+				// problems so an SSRF attempt cannot hide in the same log /
+				// metric bucket as a vendor outage.
+				s.Logger.Warn("egress_refused_at_dial", "error", err.Error())
+				http.Error(w, "egress refused", http.StatusForbidden)
+				return
+			}
 			s.Logger.Warn("upstream_error", "error", err.Error())
 			http.Error(w, "upstream error", http.StatusBadGateway)
 		},
@@ -519,7 +535,7 @@ func (s *Server) guardedDial(ctx context.Context, network, addr string) (net.Con
 	}
 	if _, isSelf := s.SelfHostnames[host]; isSelf {
 		s.Logger.Warn("egress_refused", "reason", "self_loop", "host", host)
-		return nil, fmt.Errorf("egress guard: self-loop refused (%s)", host)
+		return nil, fmt.Errorf("%w: self-loop (%s)", ErrEgressRefused, host)
 	}
 	dialAddr := addr
 	if !s.DisableEgressGuard {
@@ -533,7 +549,7 @@ func (s *Server) guardedDial(ctx context.Context, network, addr string) (net.Con
 		for _, ip := range ips {
 			if isPrivateOrLocal(ip.IP) {
 				s.Logger.Warn("egress_refused", "reason", "private_ip", "host", host, "ip", ip.IP.String())
-				return nil, fmt.Errorf("egress guard: refusing dial to %s (%s)", host, ip.IP)
+				return nil, fmt.Errorf("%w: %s resolves to %s", ErrEgressRefused, host, ip.IP)
 			}
 		}
 		dialAddr = net.JoinHostPort(ips[0].IP.String(), port)

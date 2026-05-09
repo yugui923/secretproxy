@@ -746,6 +746,58 @@ func TestIntegration_LogRedactsSecretsIncludesEUID(t *testing.T) {
 	}
 }
 
+// TestIntegration_EgressRefusalReturns403NotBadGateway proves that an SSRF
+// attempt — a seal that allowlists a host whose DNS resolves to a private IP
+// — surfaces as 403 with "egress refused", not 502 "upstream error". Without
+// this distinction an SSRF attempt aggregates into the same log/metric bucket
+// as a vendor outage, making real attacks invisible.
+func TestIntegration_EgressRefusalReturns403NotBadGateway(t *testing.T) {
+	upstream, _ := newUpstream(t)
+	defer upstream.Close()
+	pub, priv, _ := seal.GenerateKeypair()
+	srv := &Server{
+		PrivateKey:    &priv,
+		Logger:        discardLogger(),
+		SelfHostnames: map[string]struct{}{"self.example.com": {}},
+		// DisableEgressGuard intentionally false — we want the dial guard
+		// to fire. SelfHostnames covers the self-loop branch without
+		// touching DNS.
+	}
+	pURL, stop := startProxy(t, srv)
+	defer stop()
+
+	blob, err := seal.Seal(&seal.Secret{
+		BearerAuth: &seal.BearerAuth{Digest: seal.HashBearer("client-token")},
+		InjectHeader: &seal.InjectHeader{
+			Token: "tok", Format: "Bearer %s", HeaderName: "Authorization",
+		},
+		AllowedHosts:   []string{"self.example.com"},
+		AllowedMethods: []string{"GET"},
+	}, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rt, _ := client.NewTransport(pURL,
+		client.WithSealedSecret(blob),
+		client.WithAuth("client-token"),
+		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
+	)
+	resp, err := (&http.Client{Transport: rt, Timeout: 5 * time.Second}).Get("https://self.example.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("egress refusal must return 403, got %d (body=%q)", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "egress refused") {
+		t.Errorf("response body should name the refusal reason, got %q", body)
+	}
+}
+
 // TestIntegration_NonStandardPortRejected closes the bypass where seal allows a
 // non-443 port but the dial would silently rewrite to :443.
 func TestIntegration_NonStandardPortRejected(t *testing.T) {

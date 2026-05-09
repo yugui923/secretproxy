@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -331,8 +332,8 @@ func TestGuardedDial_blocksLoopback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected egress guard to block 127.0.0.1")
 	}
-	if !strings.Contains(err.Error(), "egress guard") {
-		t.Fatalf("expected egress guard error, got %v", err)
+	if !errors.Is(err, ErrEgressRefused) {
+		t.Fatalf("loopback error must wrap ErrEgressRefused so the ErrorHandler can return 403, got %v", err)
 	}
 }
 
@@ -340,8 +341,14 @@ func TestGuardedDial_blocksSelf(t *testing.T) {
 	s := &Server{SelfHostnames: map[string]struct{}{"my.host.example.com": {}}}
 	s.init()
 	_, err := s.guardedDial(context.Background(), "tcp", "my.host.example.com:443")
-	if err == nil || !strings.Contains(err.Error(), "self-loop") {
-		t.Fatalf("expected self-loop refusal, got %v", err)
+	if err == nil {
+		t.Fatal("expected self-loop refusal")
+	}
+	if !errors.Is(err, ErrEgressRefused) {
+		t.Fatalf("self-loop error must wrap ErrEgressRefused, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "self-loop") {
+		t.Fatalf("self-loop error message should name the reason, got %v", err)
 	}
 }
 
