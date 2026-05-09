@@ -789,3 +789,61 @@ func TestIntegration_NonStandardPortRejected(t *testing.T) {
 		t.Fatalf("expected 403 for non-443 port, got %d", resp.StatusCode)
 	}
 }
+
+// TestIntegration_CloudflareHeadersStrippedFromUpstream confirms that with
+// TrustCloudflareHeaders=true, the CF-* / True-Client-IP set is removed from
+// the request before it reaches the vendor API. Otherwise the proxy would
+// disclose its edge topology to every upstream it talks to.
+func TestIntegration_CloudflareHeadersStrippedFromUpstream(t *testing.T) {
+	upstream, captured := newUpstream(t)
+	defer upstream.Close()
+
+	pub, priv, _ := seal.GenerateKeypair()
+	srv := &Server{
+		PrivateKey:             &priv,
+		Transport:              hijackingTransport(upstream.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true}),
+		DisableEgressGuard:     true,
+		Logger:                 discardLogger(),
+		SelfHostnames:          map[string]struct{}{},
+		TrustTLSTerminator:     true,
+		TrustCloudflareHeaders: true,
+	}
+	pURL, stop := startProxy(t, srv)
+	defer stop()
+
+	blob := sealStripeLike(t, pub)
+	rt, _ := client.NewTransport(pURL,
+		client.WithSealedSecret(blob),
+		client.WithAuth("client-token"),
+		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
+	)
+	c := &http.Client{Transport: rt, Timeout: 5 * time.Second}
+
+	req, _ := http.NewRequest("POST", "https://api.example.com/v1/charges", nil)
+	// Simulate what Cloudflare's edge would inject ahead of the proxy.
+	req.Header.Set("CF-Connecting-IP", "203.0.113.42")
+	req.Header.Set("CF-Ray", "9f941d583926378a-YYZ")
+	req.Header.Set("CF-IPCountry", "CA")
+	req.Header.Set("CF-Visitor", `{"scheme":"https"}`)
+	req.Header.Set("True-Client-IP", "203.0.113.42")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+
+	select {
+	case got := <-captured:
+		for _, leaked := range CloudflareTrustHeaders {
+			if v := got.headers.Get(leaked); v != "" {
+				t.Errorf("%s leaked to upstream: %q", leaked, v)
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never received the request")
+	}
+}

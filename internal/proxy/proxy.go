@@ -83,6 +83,12 @@ type Server struct {
 	// TrustTLSTerminator mirrors --trust-tls-terminator and tells the
 	// ingress check to read the rightmost X-Forwarded-For entry.
 	TrustTLSTerminator bool
+	// TrustCloudflareHeaders mirrors --trust-cloudflare-headers. When set,
+	// the ingress allowlist matches CF-Connecting-IP instead of rightmost
+	// X-Forwarded-For, and the CF-* / True-Client-IP headers are stripped
+	// from upstream requests. The flag is a declaration that the proxy is
+	// unreachable except via Cloudflare — see §5.1 footgun #9.
+	TrustCloudflareHeaders bool
 
 	Transport http.RoundTripper
 
@@ -133,7 +139,7 @@ func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	if len(s.AllowedClientCIDRs) > 0 {
-		ip, err := clientIPFromRequest(r, s.TrustTLSTerminator)
+		ip, err := clientIPFromRequest(r, s.TrustTLSTerminator, s.TrustCloudflareHeaders)
 		if err != nil {
 			s.respondError(w, r, http.StatusForbidden, "client ip not allowed", err, start, nil)
 			return
@@ -265,6 +271,11 @@ func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url
 		req.RequestURI = ""
 		for _, h := range hopByHopHeaders {
 			req.Header.Del(h)
+		}
+		if s.TrustCloudflareHeaders {
+			for _, h := range CloudflareTrustHeaders {
+				req.Header.Del(h)
+			}
 		}
 		for _, h := range s.FilteredHeaders {
 			req.Header.Del(h)

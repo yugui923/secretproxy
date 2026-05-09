@@ -50,7 +50,7 @@ func TestParseAllowedClientCIDRs_bad(t *testing.T) {
 func TestClientIPFromRequest_remoteAddrOnly(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
 	req.RemoteAddr = "203.0.113.7:51000"
-	addr, err := clientIPFromRequest(req, false)
+	addr, err := clientIPFromRequest(req, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestClientIPFromRequest_xffRightmostWhenTrusted(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
 	req.RemoteAddr = "10.0.0.1:443" // edge LB, should be ignored
 	req.Header.Set("X-Forwarded-For", "1.2.3.4, 198.51.100.9, 203.0.113.7")
-	addr, err := clientIPFromRequest(req, true)
+	addr, err := clientIPFromRequest(req, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestClientIPFromRequest_xffIgnoredWhenUntrusted(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
 	req.RemoteAddr = "10.0.0.1:443"
 	req.Header.Set("X-Forwarded-For", "203.0.113.7")
-	addr, err := clientIPFromRequest(req, false)
+	addr, err := clientIPFromRequest(req, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,12 +88,61 @@ func TestClientIPFromRequest_xffIgnoredWhenUntrusted(t *testing.T) {
 func TestClientIPFromRequest_ipv4MappedNormalized(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
 	req.RemoteAddr = "[::ffff:203.0.113.7]:51000"
-	addr, err := clientIPFromRequest(req, false)
+	addr, err := clientIPFromRequest(req, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if addr.String() != "203.0.113.7" {
 		t.Fatalf("want unmapped 203.0.113.7, got %s", addr)
+	}
+}
+
+func TestClientIPFromRequest_cloudflareConnectingIP(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
+	req.RemoteAddr = "10.0.0.1:443"
+	// XFF rightmost is a CF egress IP; the spoofed values must all be ignored.
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 173.245.48.1")
+	req.Header.Set("CF-Connecting-IP", "203.0.113.7")
+	addr, err := clientIPFromRequest(req, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr.String() != "203.0.113.7" {
+		t.Fatalf("want CF-Connecting-IP 203.0.113.7, got %s", addr)
+	}
+}
+
+func TestClientIPFromRequest_cloudflareMissingHeaderFailsClosed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
+	req.RemoteAddr = "10.0.0.1:443"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 173.245.48.1")
+	// CF-Connecting-IP intentionally absent.
+	if _, err := clientIPFromRequest(req, true, true); err == nil {
+		t.Fatal("expected error when CF-Connecting-IP is missing")
+	}
+}
+
+func TestClientIPFromRequest_cloudflareMalformedHeader(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
+	req.Header.Set("CF-Connecting-IP", "not-an-ip")
+	if _, err := clientIPFromRequest(req, true, true); err == nil {
+		t.Fatal("expected parse error on malformed CF-Connecting-IP")
+	}
+}
+
+func TestClientIPFromRequest_cloudflareDisabledIgnoresHeader(t *testing.T) {
+	// With trust_cloudflare=false, a spoofed CF-Connecting-IP must be ignored
+	// even if the attacker also crafted XFF — rightmost XFF wins.
+	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
+	req.RemoteAddr = "10.0.0.1:443"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 198.51.100.9")
+	req.Header.Set("CF-Connecting-IP", "127.0.0.1")
+	addr, err := clientIPFromRequest(req, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr.String() != "198.51.100.9" {
+		t.Fatalf("CF header must be ignored when trust_cloudflare=false; got %s", addr)
 	}
 }
 
@@ -185,5 +234,68 @@ func TestHandler_ingressAllowlist_xffMatch(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("xff-allowed request should reach the forward handler (400 missing X-Upstream-URL), got %d", resp.StatusCode)
+	}
+}
+
+func TestHandler_ingressAllowlist_cloudflareConnectingIPMatch(t *testing.T) {
+	_, priv, _ := seal.GenerateKeypair()
+	prefixes, err := ParseAllowedClientCIDRs([]string{"203.0.113.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		PrivateKey:             &priv,
+		AllowedClientCIDRs:     prefixes,
+		TrustTLSTerminator:     true,
+		TrustCloudflareHeaders: true,
+		Logger:                 discardLogger(),
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	// CF-Connecting-IP is in the allowlist; XFF rightmost is a Cloudflare
+	// egress that would NOT match. Reaching 400 (missing X-Upstream-URL)
+	// proves the gate was opened by CF-Connecting-IP, not by XFF.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/forward", strings.NewReader(""))
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 173.245.48.1")
+	req.Header.Set("CF-Connecting-IP", "203.0.113.42")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("cf-connecting-ip-allowed request should reach the forward handler (400 missing X-Upstream-URL), got %d", resp.StatusCode)
+	}
+}
+
+func TestHandler_ingressAllowlist_cloudflareMissingHeaderRejected(t *testing.T) {
+	_, priv, _ := seal.GenerateKeypair()
+	prefixes, err := ParseAllowedClientCIDRs([]string{"203.0.113.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		PrivateKey:             &priv,
+		AllowedClientCIDRs:     prefixes,
+		TrustTLSTerminator:     true,
+		TrustCloudflareHeaders: true,
+		Logger:                 discardLogger(),
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	// Even with XFF rightmost in the allowlist, a missing CF-Connecting-IP
+	// must fail closed — the operator declared CF-fronting, so a request
+	// without the CF header is anomalous.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/forward", strings.NewReader(""))
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 203.0.113.42")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("missing CF-Connecting-IP should 403, got %d", resp.StatusCode)
 	}
 }

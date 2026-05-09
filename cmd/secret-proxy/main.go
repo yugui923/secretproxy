@@ -94,8 +94,13 @@ func runServe(args []string) error {
 	selfHostsFlag := fs.String("self-hostnames", selfHostsEnv, "Comma-separated extra self-loop-guard hostnames")
 	trustTermFlag := fs.Bool("trust-tls-terminator", envBool("SECRET_PROXY_TRUST_TLS_TERMINATOR"), "Listen plaintext (only safe when fronted by a TLS terminator: PaaS edge LB, mesh, ingress)")
 	allowedCIDRsFlag := fs.String("allowed-client-cidrs", allowedCIDRsEnv, "Comma-separated ingress IP allowlist on /v1/forward (CIDR or bare IP)")
+	trustCFFlag := fs.Bool("trust-cloudflare-headers", envBool("SECRET_PROXY_TRUST_CLOUDFLARE_HEADERS"), "Behind Cloudflare: read CF-Connecting-IP for the ingress allowlist and strip CF-* trust headers from upstream forwarding. Requires --trust-tls-terminator.")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if *trustCFFlag && !*trustTermFlag {
+		return errors.New("--trust-cloudflare-headers requires --trust-tls-terminator (CDN-fronted deployments terminate TLS at the edge)")
 	}
 
 	priv, err := loadPrivateKey(*privKeyFile, *privKeyHex)
@@ -122,15 +127,16 @@ func runServe(args []string) error {
 
 	logger := newLogger(*logLevelFlag)
 	srv := &proxy.Server{
-		PrivateKey:         &priv,
-		PreviousPrivateKey: prev,
-		AllowNoAuth:        *allowNoAuthFlag,
-		AllowPassthrough:   *allowPassFlag,
-		FilteredHeaders:    splitCSV(*filteredFlag),
-		SelfHostnames:      proxy.AutoSelfHostnames(splitCSV(*selfHostsFlag)),
-		AllowedClientCIDRs: allowedCIDRs,
-		TrustTLSTerminator: *trustTermFlag,
-		Logger:             logger,
+		PrivateKey:             &priv,
+		PreviousPrivateKey:     prev,
+		AllowNoAuth:            *allowNoAuthFlag,
+		AllowPassthrough:       *allowPassFlag,
+		FilteredHeaders:        splitCSV(*filteredFlag),
+		SelfHostnames:          proxy.AutoSelfHostnames(splitCSV(*selfHostsFlag)),
+		AllowedClientCIDRs:     allowedCIDRs,
+		TrustTLSTerminator:     *trustTermFlag,
+		TrustCloudflareHeaders: *trustCFFlag,
+		Logger:                 logger,
 	}
 
 	server := &http.Server{

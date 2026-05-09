@@ -54,3 +54,13 @@ services:
       # apps. See spec §5.1 footgun #9 for the trust model.
       - key: SECRET_PROXY_ALLOWED_CLIENT_CIDRS
         sync: false
+
+      # SECRET_PROXY_TRUST_CLOUDFLARE_HEADERS — set to "1" only when
+      # Cloudflare sits in front of Render. Switches the allowlist above
+      # to match CF-Connecting-IP (which Cloudflare always sets at its
+      # edge) instead of rightmost X-Forwarded-For, and strips the
+      # CF-* / True-Client-IP set from upstream forwarding. The Render
+      # origin must remain unreachable except via Cloudflare — same trust
+      # posture as TRUST_TLS_TERMINATOR (footgun #4). See spec §5.1 #9.
+      - key: SECRET_PROXY_TRUST_CLOUDFLARE_HEADERS
+        sync: false

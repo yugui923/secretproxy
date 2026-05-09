@@ -1,12 +1,31 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
 	"strings"
 )
+
+// CFConnectingIPHeader is the Cloudflare-set header carrying the real client
+// IP. Cloudflare's edge unconditionally strips any client-supplied value and
+// rewrites it with the IP it observed at TCP, so the header is trustworthy
+// only when the proxy is unreachable except via Cloudflare. See §5.1 footgun #9.
+const CFConnectingIPHeader = "CF-Connecting-IP"
+
+// CloudflareTrustHeaders is the set of CF-* / True-Client-IP headers that the
+// proxy strips from upstream requests when SECRET_PROXY_TRUST_CLOUDFLARE_HEADERS
+// is set. Without stripping, these would leak to the vendor API and disclose
+// the proxy's edge topology.
+var CloudflareTrustHeaders = []string{
+	CFConnectingIPHeader,
+	"CF-Ray",
+	"CF-IPCountry",
+	"CF-Visitor",
+	"True-Client-IP",
+}
 
 // ParseAllowedClientCIDRs parses the SECRET_PROXY_ALLOWED_CLIENT_CIDRS env /
 // --allowed-client-cidrs flag value. Bare IPv4 addresses become /32, bare
@@ -54,10 +73,24 @@ func parseCIDROrIP(raw string) (netip.Prefix, error) {
 }
 
 // clientIPFromRequest returns the IP to match against the ingress allowlist.
-// When trustTerminator is true, it uses the rightmost X-Forwarded-For entry
-// (the hop the trusted terminator added). Otherwise, it falls back to the
-// TCP peer address. See §5.1 footgun #9.
-func clientIPFromRequest(r *http.Request, trustTerminator bool) (netip.Addr, error) {
+// Resolution order:
+//  1. trustCloudflare=true → CF-Connecting-IP. The flag is a declaration that
+//     the proxy is unreachable except via Cloudflare; the header is not
+//     validated against Cloudflare's IP list. Missing or unparseable values
+//     fail closed.
+//  2. trustTerminator=true → rightmost X-Forwarded-For entry (the hop the
+//     trusted terminator added).
+//  3. Otherwise → the TCP peer address.
+//
+// See §5.1 footgun #9.
+func clientIPFromRequest(r *http.Request, trustTerminator, trustCloudflare bool) (netip.Addr, error) {
+	if trustCloudflare {
+		cfIP := strings.TrimSpace(r.Header.Get(CFConnectingIPHeader))
+		if cfIP == "" {
+			return netip.Addr{}, errors.New("cf-connecting-ip absent (trust_cloudflare_headers is set)")
+		}
+		return parseIPMaybePort(cfIP)
+	}
 	if trustTerminator {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
