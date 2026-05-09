@@ -198,17 +198,23 @@ func HashBearer(token string) string {
 }
 
 func Seal(s *Secret, pub PublicKey) (string, error) {
-	if s.EUID == "" {
-		euid, err := NewEUID()
-		if err != nil {
-			return "", fmt.Errorf("seal: generate euid: %w", err)
-		}
-		s.EUID = euid
-	}
 	if err := s.Validate(); err != nil {
 		return "", err
 	}
-	body, err := json.Marshal(s)
+	euid := s.EUID
+	if euid == "" {
+		generated, err := NewEUID()
+		if err != nil {
+			return "", fmt.Errorf("seal: generate euid: %w", err)
+		}
+		euid = generated
+	}
+	// Marshal a shallow copy so a validation/marshal failure leaves the
+	// caller's struct untouched. Without this, a retry with a fixed seal
+	// would carry the EUID stamped during the failed attempt.
+	cp := *s
+	cp.EUID = euid
+	body, err := json.Marshal(&cp)
 	if err != nil {
 		return "", err
 	}
@@ -217,6 +223,7 @@ func Seal(s *Secret, pub PublicKey) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	s.EUID = euid
 	return base64.StdEncoding.EncodeToString(sealed), nil
 }
 

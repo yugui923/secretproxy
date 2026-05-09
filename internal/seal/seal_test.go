@@ -240,6 +240,23 @@ func TestSeal_preservesProvidedEUIDAndName(t *testing.T) {
 	}
 }
 
+// TestSeal_doesNotMutateCallerOnValidationFailure locks down the rule that a
+// failed Seal leaves the caller's *Secret unchanged. Otherwise a retry would
+// carry the EUID stamped during the failed attempt and silently shift the
+// per-credential identifier on the second attempt.
+func TestSeal_doesNotMutateCallerOnValidationFailure(t *testing.T) {
+	pub, _, _ := GenerateKeypair()
+	bad := validSecret()
+	bad.AllowedHosts = nil // makes Validate() fail (no host allowlist)
+	originalEUID := bad.EUID
+	if _, err := Seal(bad, pub); err == nil {
+		t.Fatal("expected Seal to fail validation for missing host allowlist")
+	}
+	if bad.EUID != originalEUID {
+		t.Fatalf("Seal mutated caller EUID on validation failure: was %q, now %q", originalEUID, bad.EUID)
+	}
+}
+
 func TestNewEUID_uniquePerCall(t *testing.T) {
 	seen := map[string]struct{}{}
 	for range 64 {
