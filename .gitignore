@@ -66,6 +66,7 @@ bower_components/
 .env.*
 !.env.example
 !.env.template
+!.env.production.example
 .envrc
 *.local
 .secrets
@@ -105,3 +106,6 @@ mcp.json
 
 # === GitHub Copilot ===
 .copilot/
+
+# === Local-only deployment notes (real hostnames, etc.) ===
+*.local.md

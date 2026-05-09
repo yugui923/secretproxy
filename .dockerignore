@@ -1,0 +1,10 @@
+.git
+.github
+.devcontainer
+.worktrees
+.vscode
+.idea
+docs
+*.md
+Dockerfile
+.dockerignore

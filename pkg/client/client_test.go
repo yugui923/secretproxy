@@ -16,10 +16,12 @@ func TestNewTransport_invalidScheme(t *testing.T) {
 	}
 }
 
-func TestRoundTrip_setsHeadersAndRewritesScheme(t *testing.T) {
+// TestRoundTrip_v2Forward verifies the v2 wire envelope: a normal relative-URL
+// POST to /v1/forward with X-Upstream-URL, X-Sealed-Secret, X-Auth-Bearer.
+// Method mirrors and the original target URL travels in the header.
+func TestRoundTrip_v2Forward(t *testing.T) {
 	var got atomic.Pointer[http.Request]
 
-	// httptest.NewServer is plain HTTP; it acts as the proxy in this test.
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got.Store(r.Clone(r.Context()))
 		w.WriteHeader(http.StatusOK)
@@ -46,16 +48,19 @@ func TestRoundTrip_setsHeadersAndRewritesScheme(t *testing.T) {
 	if r == nil {
 		t.Fatal("proxy never received the request")
 	}
-	if r.URL.Scheme != "http" {
-		t.Errorf("scheme not rewritten: %q", r.URL.Scheme)
+	if r.URL.Path != client.ForwardPath {
+		t.Errorf("path: %q (expected %q)", r.URL.Path, client.ForwardPath)
 	}
-	if r.URL.Host != "api.example.com" {
-		t.Errorf("host changed: %q", r.URL.Host)
+	if r.Method != http.MethodGet {
+		t.Errorf("method: %q (expected GET — should mirror upstream)", r.Method)
 	}
-	if r.Header.Get("Proxy-Secret") != "blob==" {
-		t.Errorf("Proxy-Secret missing: %q", r.Header.Get("Proxy-Secret"))
+	if r.Header.Get("X-Upstream-URL") != "https://api.example.com/foo?x=1" {
+		t.Errorf("X-Upstream-URL: %q", r.Header.Get("X-Upstream-URL"))
 	}
-	if r.Header.Get("Proxy-Authorization") != "Bearer tkn" {
-		t.Errorf("Proxy-Authorization wrong: %q", r.Header.Get("Proxy-Authorization"))
+	if r.Header.Get("X-Sealed-Secret") != "blob==" {
+		t.Errorf("X-Sealed-Secret: %q", r.Header.Get("X-Sealed-Secret"))
+	}
+	if r.Header.Get("X-Auth-Bearer") != "Bearer tkn" {
+		t.Errorf("X-Auth-Bearer: %q", r.Header.Get("X-Auth-Bearer"))
 	}
 }

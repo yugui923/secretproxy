@@ -1,6 +1,21 @@
-// Package proxy implements the forward HTTP proxy handler from §3.1 of the
-// design spec: header parsing, sealed-secret validation, processor execution,
-// egress guard, and upstream forwarding.
+// Package proxy implements the relative-endpoint forward handler from §3.1
+// of the design spec.
+//
+// Wire protocol (v1):
+//
+//	<METHOD> /v1/forward HTTP/1.1
+//	Host: <proxy-host>
+//	X-Upstream-URL: https://<vendor>/<path>?<query>
+//	X-Sealed-Secret: <base64> [; <json-override>]
+//	X-Auth-Bearer: Bearer <token>      (or Basic <b64(user:pass)>)
+//	<original body>
+//
+// The method on the proxy mirrors the upstream method. Body streams 1:1.
+// The proxy unseals, validates host/path/method against the seal, runs the
+// processor (typically inject_header for an upstream Authorization), and
+// forwards over TLS to the upstream. The relative-URL form was chosen so
+// the proxy traverses reverse-proxy CDNs (Render, Cloud Run, Heroku, etc.)
+// — those reject absolute-form HTTP_PROXY-style requests.
 package proxy
 
 import (
@@ -24,14 +39,20 @@ import (
 )
 
 const (
-	HeaderProxySecret = "Proxy-Secret"
-	HeaderProxyAuth   = "Proxy-Authorization"
-	PublicKeyPath     = "/public-key"
-	HealthPath        = "/healthz"
-	ReadyPath         = "/readyz"
-	UpstreamPort      = "443"
+	HeaderUpstreamURL  = "X-Upstream-URL"
+	HeaderSealedSecret = "X-Sealed-Secret"
+	HeaderAuthBearer   = "X-Auth-Bearer"
+
+	PublicKeyPath = "/public-key"
+	HealthPath    = "/healthz"
+	ReadyPath     = "/readyz"
+	ForwardPath   = "/v1/forward"
+
+	UpstreamPort = "443"
 )
 
+// hopByHopHeaders lists every header the proxy strips before forwarding to
+// upstream. RFC 7230 §6.1 hop-by-hop set, plus our control headers.
 var hopByHopHeaders = []string{
 	"Connection",
 	"Proxy-Connection",
@@ -40,11 +61,12 @@ var hopByHopHeaders = []string{
 	"Trailer",
 	"Transfer-Encoding",
 	"Upgrade",
-	HeaderProxySecret,
-	HeaderProxyAuth,
+	HeaderUpstreamURL,
+	HeaderSealedSecret,
+	HeaderAuthBearer,
 }
 
-var errMissingSecret = errors.New("missing Proxy-Secret header")
+var errMissingSecret = errors.New("missing X-Sealed-Secret header")
 
 type Server struct {
 	PrivateKey         *seal.PrivateKey
@@ -55,13 +77,8 @@ type Server struct {
 	SelfHostnames      map[string]struct{}
 	Logger             *slog.Logger
 
-	// Transport overrides the upstream RoundTripper. Tests use this to inject a
-	// trust-anything TLS config or a non-guarded dialer. If nil, the server
-	// constructs a guarded transport with the system trust store.
 	Transport http.RoundTripper
 
-	// DisableEgressGuard skips the RFC1918/loopback/link-local egress check.
-	// Tests flip this so they can dial httptest servers on 127.0.0.1.
 	DisableEgressGuard bool
 
 	once sync.Once
@@ -86,16 +103,17 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == PublicKeyPath && r.URL.Host == "" {
+	switch r.URL.Path {
+	case PublicKeyPath:
 		s.handlePublicKey(w, r)
-		return
-	}
-	if (r.URL.Path == HealthPath || r.URL.Path == ReadyPath) && r.URL.Host == "" {
+	case HealthPath, ReadyPath:
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
-		return
+	case ForwardPath:
+		s.handleForward(w, r)
+	default:
+		http.NotFound(w, r)
 	}
-	s.handleProxy(w, r)
 }
 
 func (s *Server) handlePublicKey(w http.ResponseWriter, _ *http.Request) {
@@ -104,27 +122,39 @@ func (s *Server) handlePublicKey(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, pub.Hex())
 }
 
-func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	logFields := []any{
-		"method", r.Method,
-		"host", r.Host,
-		"path", r.URL.Path,
-		"query_keys", queryKeys(r.URL),
-	}
 
-	if vals := r.Header.Values(HeaderProxySecret); len(vals) > 1 {
-		s.respondError(w, r, http.StatusBadRequest, "multiple Proxy-Secret headers (chaining deferred at v1)", nil, start, logFields)
+	upstreamRaw := r.Header.Get(HeaderUpstreamURL)
+	if upstreamRaw == "" {
+		s.respondError(w, r, http.StatusBadRequest, "missing X-Upstream-URL", nil, start, nil)
+		return
+	}
+	upstream, err := url.Parse(upstreamRaw)
+	if err != nil || upstream.Host == "" {
+		s.respondError(w, r, http.StatusBadRequest, "bad X-Upstream-URL", err, start, nil)
 		return
 	}
 
-	blob, override, err := parseProxySecret(r.Header.Get(HeaderProxySecret))
+	logFields := []any{
+		"method", r.Method,
+		"host", upstream.Host,
+		"path", upstream.Path,
+		"query_keys", queryKeys(upstream),
+	}
+
+	if vals := r.Header.Values(HeaderSealedSecret); len(vals) > 1 {
+		s.respondError(w, r, http.StatusBadRequest, "multiple X-Sealed-Secret headers (chaining deferred)", nil, start, logFields)
+		return
+	}
+
+	blob, override, err := parseSealedHeader(r.Header.Get(HeaderSealedSecret))
 	if err != nil {
 		if errors.Is(err, errMissingSecret) && s.AllowPassthrough {
-			s.passthrough(w, r, start, logFields)
+			s.passthrough(w, r, upstream, start, logFields)
 			return
 		}
-		s.respondError(w, r, http.StatusBadRequest, "invalid Proxy-Secret", err, start, logFields)
+		s.respondError(w, r, http.StatusBadRequest, "invalid X-Sealed-Secret", err, start, logFields)
 		return
 	}
 
@@ -144,7 +174,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case secret.BearerAuth != nil:
-		bearer, ok := extractBearer(r.Header.Get(HeaderProxyAuth))
+		bearer, ok := extractBearer(r.Header.Get(HeaderAuthBearer))
 		if !ok || !secret.BearerAuth.VerifyBearer(bearer) {
 			s.respondError(w, r, http.StatusUnauthorized, "bearer mismatch", nil, start, logFields)
 			return
@@ -162,32 +192,44 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := validateRequest(r, secret); err != nil {
+	if err := rejectNonStandardPort(upstream.Host); err != nil {
+		s.respondError(w, r, http.StatusForbidden, "request not permitted", err, start, logFields)
+		return
+	}
+	if err := validateHost(upstream.Host, secret); err != nil {
+		s.respondError(w, r, http.StatusForbidden, "request not permitted", err, start, logFields)
+		return
+	}
+	if err := validatePath(upstream.Path, secret); err != nil {
+		s.respondError(w, r, http.StatusForbidden, "request not permitted", err, start, logFields)
+		return
+	}
+	if err := validateMethod(r.Method, secret); err != nil {
 		s.respondError(w, r, http.StatusForbidden, "request not permitted", err, start, logFields)
 		return
 	}
 
 	sw := newStatusWriter(w)
-	s.forward(sw, r, secret.InjectHeader, format, headerName)
+	s.forwardTo(sw, r, upstream, secret.InjectHeader, format, headerName)
 	s.Logger.Info("proxied",
 		append(logFields, "status", sw.status, "dur_ms", time.Since(start).Milliseconds())...)
 }
 
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, start time.Time, logFields []any) {
-	if err := rejectNonStandardPort(r.Host); err != nil {
+func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, upstream *url.URL, start time.Time, logFields []any) {
+	if err := rejectNonStandardPort(upstream.Host); err != nil {
 		s.respondError(w, r, http.StatusForbidden, "request not permitted", err, start, logFields)
 		return
 	}
 	sw := newStatusWriter(w)
-	s.forward(sw, r, nil, "", "")
+	s.forwardTo(sw, r, upstream, nil, "", "")
 	s.Logger.Info("passthrough",
 		append(logFields, "status", sw.status, "dur_ms", time.Since(start).Milliseconds())...)
 }
 
-func (s *Server) forward(w http.ResponseWriter, r *http.Request, ih *seal.InjectHeader, format, headerName string) {
-	target := *r.URL
+func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url.URL, ih *seal.InjectHeader, format, headerName string) {
+	target := *upstream
 	target.Scheme = "https"
-	target.Host = stripPort(r.Host)
+	target.Host = stripPort(upstream.Host)
 	if target.Host == "" {
 		http.Error(w, "missing target host", http.StatusBadRequest)
 		return
@@ -228,9 +270,6 @@ func (s *Server) respondError(w http.ResponseWriter, r *http.Request, code int, 
 	http.Error(w, msg, code)
 }
 
-// statusWriter wraps an http.ResponseWriter to capture the status code that
-// downstream code (e.g. httputil.ReverseProxy) writes, so the access log line
-// reflects the real upstream/error status instead of an assumed 200.
 type statusWriter struct {
 	http.ResponseWriter
 	status  int
@@ -257,7 +296,9 @@ func (s *statusWriter) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
-func parseProxySecret(raw string) (blob string, override map[string]any, err error) {
+// parseSealedHeader splits an X-Sealed-Secret value of "<blob> ; <json>" into
+// the base64 blob and the optional JSON override map (§2.5).
+func parseSealedHeader(raw string) (blob string, override map[string]any, err error) {
 	if raw == "" {
 		return "", nil, errMissingSecret
 	}
@@ -277,9 +318,8 @@ func parseProxySecret(raw string) (blob string, override map[string]any, err err
 	return blob, override, nil
 }
 
-// extractBearer pulls the credential to compare against the sealed digest from
-// a Proxy-Authorization header. For Basic, the spec (§2.3) says the password
-// half is compared, so we base64-decode and split on ":". Bearer is taken raw.
+// extractBearer accepts "Bearer <token>" or "Basic <base64(user:pass)>". For
+// Basic, the password half is returned (matches §2.3).
 func extractBearer(h string) (string, bool) {
 	const bearerPrefix = "Bearer "
 	if strings.HasPrefix(h, bearerPrefix) {
@@ -301,9 +341,6 @@ func extractBearer(h string) (string, bool) {
 	return "", false
 }
 
-// resolveProcessor returns the (format, headerName) pair after applying any
-// runtime overrides from the Proxy-Secret JSON suffix. It does not mutate the
-// sealed *InjectHeader — the secret is conceptually immutable once decrypted.
 func resolveProcessor(ih *seal.InjectHeader, override map[string]any) (format, headerName string, err error) {
 	if ih == nil {
 		return "", "", errors.New("no processor in seal")
@@ -345,30 +382,13 @@ func resolveProcessor(ih *seal.InjectHeader, override map[string]any) (format, h
 	return format, headerName, nil
 }
 
-func validateRequest(r *http.Request, secret *seal.Secret) error {
-	if err := rejectNonStandardPort(r.Host); err != nil {
-		return err
-	}
-	if err := validateHost(r.Host, secret); err != nil {
-		return err
-	}
-	if err := validatePath(r.URL.Path, secret); err != nil {
-		return err
-	}
-	return validateMethod(r.Method, secret)
-}
-
-// rejectNonStandardPort enforces the §3.2 invariant that proxy → upstream is
-// always TLS to port 443. The dial code rewrites the dial port unconditionally,
-// so a request whose host carries a non-443 port would otherwise be silently
-// redirected — exactly the bypass the agent flagged.
 func rejectNonStandardPort(host string) error {
 	if host == "" {
 		return errors.New("empty host")
 	}
 	_, port, err := net.SplitHostPort(host)
 	if err != nil {
-		return nil // no port present, defaults to 443 at dial time
+		return nil
 	}
 	if port != UpstreamPort {
 		return fmt.Errorf("non-443 port %q rejected (per-host port passthrough deferred)", port)
@@ -438,9 +458,6 @@ func validateMethod(method string, secret *seal.Secret) error {
 	return fmt.Errorf("method %q not in allowed_methods", method)
 }
 
-// guardedDial blocks RFC 1918 / loopback / link-local destinations and
-// self-loops. It dials the resolved IP rather than the hostname to defeat DNS
-// rebinding (TOCTOU between the policy check and the dial).
 func (s *Server) guardedDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -506,8 +523,6 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
-// AutoSelfHostnames returns a default self-loop-guard set: localhost, loopback
-// IPs, and os.Hostname(). Operators can extend this via config.
 func AutoSelfHostnames(extra []string) map[string]struct{} {
 	out := map[string]struct{}{
 		"localhost": {},

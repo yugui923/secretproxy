@@ -73,7 +73,6 @@ Subcommands:
 
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	listen := envOr("SECRET_PROXY_LISTEN_ADDRESS", ":8443")
 	logLevel := envOr("SECRET_PROXY_LOG_LEVEL", "info")
 	allowNoAuth := envBool("SECRET_PROXY_ALLOW_NO_AUTH")
 	allowPass := envBool("SECRET_PROXY_ALLOW_PASSTHROUGH")
@@ -83,14 +82,16 @@ func runServe(args []string) error {
 	privKeyFile := fs.String("private-key-file", os.Getenv("SECRET_PROXY_PRIVATE_KEY_FILE"), "Path to PEM/hex Curve25519 private key")
 	privKeyHex := fs.String("private-key", os.Getenv("SECRET_PROXY_PRIVATE_KEY"), "Hex-encoded Curve25519 private key (dev only)")
 	prevKeyFile := fs.String("previous-private-key-file", os.Getenv("SECRET_PROXY_PREVIOUS_PRIVATE_KEY_FILE"), "Optional second private key file (rotation)")
+	prevKeyHex := fs.String("previous-private-key", os.Getenv("SECRET_PROXY_PREVIOUS_PRIVATE_KEY"), "Optional inline second private key (rotation; PaaS-only)")
 	tlsCertFile := fs.String("tls-cert-file", os.Getenv("SECRET_PROXY_TLS_CERT_FILE"), "Path to TLS cert PEM")
 	tlsKeyFile := fs.String("tls-key-file", os.Getenv("SECRET_PROXY_TLS_KEY_FILE"), "Path to TLS key PEM")
-	listenAddr := fs.String("listen-address", listen, "Bind address")
+	listenAddr := fs.String("listen-address", defaultListenAddr(), "Bind address (defaults to :$PORT if PORT set, else :8443)")
 	logLevelFlag := fs.String("log-level", logLevel, "debug | info | warn | error")
 	allowNoAuthFlag := fs.Bool("allow-no-auth", allowNoAuth, "Permit no_auth sealed secrets")
 	allowPassFlag := fs.Bool("allow-passthrough", allowPass, "Forward requests without a sealed secret")
 	filteredFlag := fs.String("filtered-headers", filteredEnv, "Comma-separated extra request headers to strip")
 	selfHostsFlag := fs.String("self-hostnames", selfHostsEnv, "Comma-separated extra self-loop-guard hostnames")
+	trustTermFlag := fs.Bool("trust-tls-terminator", envBool("SECRET_PROXY_TRUST_TLS_TERMINATOR"), "Listen plaintext (only safe when fronted by a TLS terminator: PaaS edge LB, mesh, ingress)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -99,19 +100,17 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	var prev *seal.PrivateKey
-	if *prevKeyFile != "" {
-		k, err := seal.ReadPrivateKeyFile(*prevKeyFile)
-		if err != nil {
-			return fmt.Errorf("previous-private-key: %w", err)
-		}
-		prev = &k
-	}
-	if *tlsCertFile == "" || *tlsKeyFile == "" {
-		return errors.New("--tls-cert-file and --tls-key-file are required")
-	}
-	if _, _, err := proxy.LoadCert(*tlsCertFile, *tlsKeyFile); err != nil {
+	prev, err := loadPreviousPrivateKey(*prevKeyFile, *prevKeyHex)
+	if err != nil {
 		return err
+	}
+	if !*trustTermFlag {
+		if *tlsCertFile == "" || *tlsKeyFile == "" {
+			return errors.New("--tls-cert-file and --tls-key-file are required (or set --trust-tls-terminator if behind a TLS terminator like a PaaS edge LB)")
+		}
+		if _, _, err := proxy.LoadCert(*tlsCertFile, *tlsKeyFile); err != nil {
+			return err
+		}
 	}
 
 	logger := newLogger(*logLevelFlag)
@@ -129,12 +128,14 @@ func runServe(args []string) error {
 		Addr:              *listenAddr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		TLSConfig: &tls.Config{
+	}
+	if !*trustTermFlag {
+		server.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS13,
 			NextProtos: []string{"http/1.1"},
-		},
+		}
 		// HTTP/2 has no absolute-form requests, so the forward-proxy hop must speak HTTP/1.1.
-		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
+		server.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -142,8 +143,13 @@ func runServe(args []string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", *listenAddr, "tls", "1.3", "passthrough", *allowPassFlag)
-		errCh <- server.ListenAndServeTLS(*tlsCertFile, *tlsKeyFile)
+		if *trustTermFlag {
+			logger.Info("listening", "addr", *listenAddr, "tls", "behind-terminator", "passthrough", *allowPassFlag)
+			errCh <- server.ListenAndServe()
+		} else {
+			logger.Info("listening", "addr", *listenAddr, "tls", "1.3", "passthrough", *allowPassFlag)
+			errCh <- server.ListenAndServeTLS(*tlsCertFile, *tlsKeyFile)
+		}
 	}()
 
 	select {
@@ -167,6 +173,36 @@ func runServe(args []string) error {
 		}
 		return err
 	}
+}
+
+// defaultListenAddr honors SECRET_PROXY_LISTEN_ADDRESS, falls back to PORT
+// (set by Render / Heroku / Cloud Run / App Runner), then :8443.
+func defaultListenAddr() string {
+	if v := os.Getenv("SECRET_PROXY_LISTEN_ADDRESS"); v != "" {
+		return v
+	}
+	if port := os.Getenv("PORT"); port != "" {
+		return ":" + port
+	}
+	return ":8443"
+}
+
+func loadPreviousPrivateKey(file, hexStr string) (*seal.PrivateKey, error) {
+	if file != "" {
+		k, err := seal.ReadPrivateKeyFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("previous-private-key-file: %w", err)
+		}
+		return &k, nil
+	}
+	if hexStr != "" {
+		k, err := seal.ParsePrivateKey(hexStr)
+		if err != nil {
+			return nil, fmt.Errorf("previous-private-key: %w", err)
+		}
+		return &k, nil
+	}
+	return nil, nil
 }
 
 func runSeal(args []string) error {

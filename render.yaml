@@ -1,0 +1,47 @@
+# Render Blueprint for the Secret Proxy.
+# https://render.com/docs/blueprint-spec
+#
+# To deploy:
+#   1. Push this file to your repo's main branch (already done if you're reading this).
+#   2. In Render: New → Blueprint, connect this repo.
+#   3. Set the secret env vars in the dashboard before the first deploy:
+#        - SECRET_PROXY_PRIVATE_KEY = <hex private key from `secret-proxy gen-keypair`>
+#        - SECRET_PROXY_SELF_HOSTNAMES = <Render-issued + custom hostnames, comma-separated>
+#      Distribute the matching public hex to client-app operators so they
+#      can seal credentials.
+#   4. (During key rotation only) set SECRET_PROXY_PREVIOUS_PRIVATE_KEY in the
+#      dashboard, re-seal client secrets against the new public key, then
+#      remove the previous key.
+
+services:
+  - type: web
+    name: secret-proxy
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      # Render terminates TLS at its edge and forwards plaintext HTTP on $PORT.
+      # The proxy listens plain on $PORT and trusts Render's TLS edge.
+      # See spec §3.2 (behind-terminator mode) and §5.1 footgun #4.
+      - key: SECRET_PROXY_TRUST_TLS_TERMINATOR
+        value: "1"
+
+      # Strip Render's trust-anchor headers so clients can't spoof identity.
+      - key: SECRET_PROXY_FILTERED_HEADERS
+        value: X-Forwarded-For,X-Real-IP,X-Forwarded-Proto,X-Render-Origin-Server
+
+      - key: SECRET_PROXY_LOG_LEVEL
+        value: info
+
+      # ── Set in the Render dashboard (sync: false), NEVER in this file ────
+      #
+      # SECRET_PROXY_SELF_HOSTNAMES — every hostname this proxy is publicly
+      # reachable under (Render-issued subdomain + any custom domains),
+      # comma-separated. Required: the loop guard refuses to dial these.
+      - key: SECRET_PROXY_SELF_HOSTNAMES
+        sync: false
+
+      # SECRET_PROXY_PRIVATE_KEY — Curve25519 private key, hex.
+      - key: SECRET_PROXY_PRIVATE_KEY
+        sync: false

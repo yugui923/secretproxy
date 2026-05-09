@@ -18,8 +18,8 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func TestParseProxySecret_blobOnly(t *testing.T) {
-	blob, override, err := parseProxySecret("abc==")
+func TestParseSealedHeader_blobOnly(t *testing.T) {
+	blob, override, err := parseSealedHeader("abc==")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,8 +31,8 @@ func TestParseProxySecret_blobOnly(t *testing.T) {
 	}
 }
 
-func TestParseProxySecret_withOverride(t *testing.T) {
-	blob, override, err := parseProxySecret(`abc== ; {"format":"%s"}`)
+func TestParseSealedHeader_withOverride(t *testing.T) {
+	blob, override, err := parseSealedHeader(`abc== ; {"format":"%s"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,14 +44,14 @@ func TestParseProxySecret_withOverride(t *testing.T) {
 	}
 }
 
-func TestParseProxySecret_empty(t *testing.T) {
-	if _, _, err := parseProxySecret(""); err == nil {
+func TestParseSealedHeader_empty(t *testing.T) {
+	if _, _, err := parseSealedHeader(""); err == nil {
 		t.Fatal("expected error for empty header")
 	}
 }
 
-func TestParseProxySecret_badJSON(t *testing.T) {
-	if _, _, err := parseProxySecret("abc==;{not json}"); err == nil {
+func TestParseSealedHeader_badJSON(t *testing.T) {
+	if _, _, err := parseSealedHeader("abc==;{not json}"); err == nil {
 		t.Fatal("expected JSON error")
 	}
 }
@@ -63,8 +63,6 @@ func TestExtractBearer_bearer(t *testing.T) {
 	}
 }
 
-// TestExtractBearer_basic verifies the §2.3 contract that the password half is
-// compared (not the base64 user:pass blob).
 func TestExtractBearer_basic(t *testing.T) {
 	cred := base64.StdEncoding.EncodeToString([]byte("alice:s3cret"))
 	v, ok := extractBearer("Basic " + cred)
@@ -98,7 +96,6 @@ func TestResolveProcessor_acceptedFormat(t *testing.T) {
 	if format != "%s" || hn != "Authorization" {
 		t.Fatalf("got format=%q header=%q", format, hn)
 	}
-	// Ensure the seal was NOT mutated.
 	if ih.Format != "" {
 		t.Fatal("resolveProcessor must not mutate the seal")
 	}
@@ -156,8 +153,6 @@ func TestValidateHost_pattern(t *testing.T) {
 	}
 }
 
-// TestRejectNonStandardPort closes the bypass where seal+request both use a
-// non-443 port: validation passed but the dial silently rewrote to 443.
 func TestRejectNonStandardPort(t *testing.T) {
 	cases := map[string]bool{
 		"api.stripe.com":      true,
@@ -248,9 +243,9 @@ func TestGuardedDial_blocksLoopback(t *testing.T) {
 }
 
 func TestGuardedDial_blocksSelf(t *testing.T) {
-	s := &Server{SelfHostnames: map[string]struct{}{"myhost.example.com": {}}}
+	s := &Server{SelfHostnames: map[string]struct{}{"my.host.example.com": {}}}
 	s.init()
-	_, err := s.guardedDial(context.Background(), "tcp", "myhost.example.com:443")
+	_, err := s.guardedDial(context.Background(), "tcp", "my.host.example.com:443")
 	if err == nil || !strings.Contains(err.Error(), "self-loop") {
 		t.Fatalf("expected self-loop refusal, got %v", err)
 	}
@@ -311,8 +306,22 @@ func TestHandler_health(t *testing.T) {
 	}
 }
 
-// TestStatusWriter_capturesUpstreamStatus verifies the access-log status field
-// reflects whatever ReverseProxy actually wrote, not a hard-coded 200.
+func TestHandler_unknownPath404(t *testing.T) {
+	_, priv, _ := seal.GenerateKeypair()
+	s := &Server{PrivateKey: &priv, Logger: discardLogger()}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/no/such/path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
 func TestStatusWriter_capturesUpstreamStatus(t *testing.T) {
 	rec := httptest.NewRecorder()
 	sw := newStatusWriter(rec)
@@ -320,7 +329,6 @@ func TestStatusWriter_capturesUpstreamStatus(t *testing.T) {
 	if sw.status != 503 {
 		t.Fatalf("expected 503, got %d", sw.status)
 	}
-	// Subsequent WriteHeader is ignored, like Go's stdlib behavior.
 	sw.WriteHeader(200)
 	if sw.status != 503 {
 		t.Fatalf("status changed after first WriteHeader: %d", sw.status)

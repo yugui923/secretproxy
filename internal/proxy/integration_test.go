@@ -16,8 +16,6 @@ import (
 	"github.com/yugui923/secretproxy/pkg/client"
 )
 
-func urlParse(s string) (*url.URL, error) { return url.Parse(s) }
-
 type capturedRequest struct {
 	method  string
 	path    string
@@ -45,9 +43,6 @@ func newUpstream(t *testing.T) (*httptest.Server, <-chan *capturedRequest) {
 	return srv, ch
 }
 
-// hijackingTransport ignores the requested addr and always dials the test
-// upstream. Lets us run an httptest server on 127.0.0.1 without conflicting
-// with the egress guard.
 func hijackingTransport(upstreamAddr string, upstreamCert *tls.Config) http.RoundTripper {
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -74,9 +69,7 @@ func startProxy(t *testing.T, srv *Server) (proxyURL string, stop func()) {
 		Handler: srv.Handler(),
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS13,
-			NextProtos: []string{"http/1.1"},
 		},
-		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 	}
 	done := make(chan error, 1)
 	go func() { done <- httpSrv.ServeTLS(listener, cert, key) }()
@@ -182,11 +175,10 @@ func TestIntegration_HappyPath(t *testing.T) {
 		if got.headers.Get("Authorization") != "Bearer sk_live_xxx" {
 			t.Errorf("upstream Authorization: %q", got.headers.Get("Authorization"))
 		}
-		if got.headers.Get("Proxy-Secret") != "" {
-			t.Errorf("Proxy-Secret leaked to upstream: %q", got.headers.Get("Proxy-Secret"))
-		}
-		if got.headers.Get("Proxy-Authorization") != "" {
-			t.Errorf("Proxy-Authorization leaked to upstream: %q", got.headers.Get("Proxy-Authorization"))
+		for _, leaked := range []string{"X-Upstream-URL", "X-Sealed-Secret", "X-Auth-Bearer"} {
+			if got.headers.Get(leaked) != "" {
+				t.Errorf("%s leaked to upstream: %q", leaked, got.headers.Get(leaked))
+			}
 		}
 		if got.method != "POST" || got.path != "/v1/charges" {
 			t.Errorf("upstream got %s %s", got.method, got.path)
@@ -386,40 +378,41 @@ func TestIntegration_PassthroughWithoutSeal(t *testing.T) {
 	}
 }
 
-// TestIntegration_MultipleProxySecretRejected closes the silent-drop bypass
-// where chained Proxy-Secret headers appeared accepted but only the first was
-// processed. We bypass pkg/client (which uses Header.Set) and drive the proxy
-// directly with a raw http.Transport so two Proxy-Secret headers actually
-// reach the wire.
-func TestIntegration_MultipleProxySecretRejected(t *testing.T) {
+// TestIntegration_MultipleSealedSecretRejected verifies the chaining-deferred
+// guard. We use a raw http.Transport so we can add two X-Sealed-Secret values;
+// pkg/client uses Header.Set which would collapse them.
+func TestIntegration_MultipleSealedSecretRejected(t *testing.T) {
 	upstream, _ := newUpstream(t)
 	defer upstream.Close()
 	p := setupProxy(t, upstream)
 	defer p.stop()
 
 	blob := sealStripeLike(t, p.pub)
-	proxyURL, _ := urlParse(p.url)
+	proxyURL, _ := url.Parse(p.url)
 	tr := &http.Transport{
-		Proxy:           http.ProxyURL(proxyURL),
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
 	c := &http.Client{Transport: tr, Timeout: 5 * time.Second}
-	req, _ := http.NewRequest("POST", "http://api.example.com/v1/charges", nil)
-	req.Header.Add("Proxy-Secret", blob)
-	req.Header.Add("Proxy-Secret", "extra-blob")
-	req.Header.Set("Proxy-Authorization", "Bearer client-token")
+
+	forwardURL := *proxyURL
+	forwardURL.Path = ForwardPath
+	req, _ := http.NewRequest("POST", forwardURL.String(), nil)
+	req.Header.Set("X-Upstream-URL", "https://api.example.com/v1/charges")
+	req.Header.Add("X-Sealed-Secret", blob)
+	req.Header.Add("X-Sealed-Secret", "extra-blob")
+	req.Header.Set("X-Auth-Bearer", "Bearer client-token")
 	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 for chained Proxy-Secret, got %d", resp.StatusCode)
+		t.Fatalf("expected 400 for chained X-Sealed-Secret, got %d", resp.StatusCode)
 	}
 }
 
-// TestIntegration_NonStandardPortRejected closes the bypass where seal
-// validates with `host:8080` but dial silently rewrites to :443.
+// TestIntegration_NonStandardPortRejected closes the bypass where seal allows a
+// non-443 port but the dial would silently rewrite to :443.
 func TestIntegration_NonStandardPortRejected(t *testing.T) {
 	upstream, _ := newUpstream(t)
 	defer upstream.Close()
@@ -431,7 +424,7 @@ func TestIntegration_NonStandardPortRejected(t *testing.T) {
 		Logger:             discardLogger(),
 		SelfHostnames:      map[string]struct{}{},
 	}
-	url, stop := startProxy(t, srv)
+	pURL, stop := startProxy(t, srv)
 	defer stop()
 
 	blob, err := seal.Seal(&seal.Secret{
@@ -439,14 +432,13 @@ func TestIntegration_NonStandardPortRejected(t *testing.T) {
 		InjectHeader: &seal.InjectHeader{
 			Token: "tok", Format: "Bearer %s", HeaderName: "Authorization",
 		},
-		// An operator that *thinks* port-passthrough works:
 		AllowedHosts: []string{"api.example.com:8080"},
 	}, pub)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	rt, _ := client.NewTransport(url,
+	rt, _ := client.NewTransport(pURL,
 		client.WithSealedSecret(blob),
 		client.WithAuth("client-token"),
 		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
