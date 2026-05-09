@@ -78,6 +78,7 @@ func runServe(args []string) error {
 	allowPass := envBool("SECRET_PROXY_ALLOW_PASSTHROUGH")
 	filteredEnv := os.Getenv("SECRET_PROXY_FILTERED_HEADERS")
 	selfHostsEnv := os.Getenv("SECRET_PROXY_SELF_HOSTNAMES")
+	allowedCIDRsEnv := os.Getenv("SECRET_PROXY_ALLOWED_CLIENT_CIDRS")
 
 	privKeyFile := fs.String("private-key-file", os.Getenv("SECRET_PROXY_PRIVATE_KEY_FILE"), "Path to PEM/hex Curve25519 private key")
 	privKeyHex := fs.String("private-key", os.Getenv("SECRET_PROXY_PRIVATE_KEY"), "Hex-encoded Curve25519 private key (dev only)")
@@ -92,6 +93,7 @@ func runServe(args []string) error {
 	filteredFlag := fs.String("filtered-headers", filteredEnv, "Comma-separated extra request headers to strip")
 	selfHostsFlag := fs.String("self-hostnames", selfHostsEnv, "Comma-separated extra self-loop-guard hostnames")
 	trustTermFlag := fs.Bool("trust-tls-terminator", envBool("SECRET_PROXY_TRUST_TLS_TERMINATOR"), "Listen plaintext (only safe when fronted by a TLS terminator: PaaS edge LB, mesh, ingress)")
+	allowedCIDRsFlag := fs.String("allowed-client-cidrs", allowedCIDRsEnv, "Comma-separated ingress IP allowlist on /v1/forward (CIDR or bare IP)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -113,6 +115,11 @@ func runServe(args []string) error {
 		}
 	}
 
+	allowedCIDRs, err := proxy.ParseAllowedClientCIDRs(splitCSV(*allowedCIDRsFlag))
+	if err != nil {
+		return err
+	}
+
 	logger := newLogger(*logLevelFlag)
 	srv := &proxy.Server{
 		PrivateKey:         &priv,
@@ -121,6 +128,8 @@ func runServe(args []string) error {
 		AllowPassthrough:   *allowPassFlag,
 		FilteredHeaders:    splitCSV(*filteredFlag),
 		SelfHostnames:      proxy.AutoSelfHostnames(splitCSV(*selfHostsFlag)),
+		AllowedClientCIDRs: allowedCIDRs,
+		TrustTLSTerminator: *trustTermFlag,
 		Logger:             logger,
 	}
 

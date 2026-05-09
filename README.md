@@ -49,6 +49,7 @@ A ready-to-use Render Blueprint lives at [`render.yaml`](render.yaml). In Render
 
 - `SECRET_PROXY_PRIVATE_KEY` — output of `secret-proxy gen-keypair` (private hex).
 - `SECRET_PROXY_SELF_HOSTNAMES` — every hostname the proxy is publicly reachable under (Render-issued subdomain plus any custom domains, comma-separated). The loop guard refuses to dial these.
+- `SECRET_PROXY_ALLOWED_CLIENT_CIDRS` _(optional)_ — comma-separated CIDR / bare-IP ingress allowlist on `/v1/forward`. Behind Render's TLS edge the rightmost `X-Forwarded-For` hop is what's matched, so list your client apps' public egress IPs. Empty/unset = off. Health and `/public-key` probes are always allowed. Spec [§5.1 footgun #9](docs/specs/2026-05-08-secret-proxy.md#51-footguns).
 
 The Blueprint runs the proxy with `SECRET_PROXY_TRUST_TLS_TERMINATOR=1`, listening plaintext on `$PORT` while Render's edge handles TLS to clients (spec [§3.2](docs/specs/2026-05-08-secret-proxy.md#32-transport-security)). Same model works for Cloud Run, Heroku, App Runner.
 

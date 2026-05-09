@@ -168,6 +168,7 @@ The Curve25519 private key resolves in this order: `--private-key-file` → `--p
 | `SECRET_PROXY_ALLOW_PASSTHROUGH`         | `--allow-passthrough`         | bool                          | `false`                                          | Forward requests without a sealed secret.                           |
 | `SECRET_PROXY_SELF_HOSTNAMES`            | `--self-hostnames`            | comma list                    | auto: `localhost`, loopback IPs, `os.Hostname()` | Loop guard. User values merged with auto-detected set.              |
 | `SECRET_PROXY_ALLOW_NO_AUTH`             | `--allow-no-auth`             | bool                          | `false`                                          | Permit `no_auth` sealed secrets.                                    |
+| `SECRET_PROXY_ALLOWED_CLIENT_CIDRS`      | `--allowed-client-cidrs`      | comma list of CIDR / IP       | empty (off)                                      | Ingress IP allowlist on `/v1/forward`. See §5.2 and §5.1 footgun #9.|
 | `SECRET_PROXY_LOG_LEVEL`                 | `--log-level`                 | `debug`/`info`/`warn`/`error` | `info`                                           | Log level. `debug` also enables verbose proxy-internal logging.     |
 
 ¹ Exactly one of the four private-key sources is required. TLS 1.3 is enforced at the listener; there is no version-downgrade flag.
@@ -235,12 +236,14 @@ Multi-stage Dockerfile: Go build stage, then `alpine:3` with `ca-certificates`. 
 6. **Trust-anchor headers must be filtered.** Any header the proxy itself trusts (`X-Forwarded-For`, sidecar identity) must appear in `SECRET_PROXY_FILTERED_HEADERS` or clients can spoof.
 7. **Host allowlist is mandatory in practice** — the CLI refuses to seal without one.
 8. **No body size cap.** Add `--max-request-bytes` if large bodies are observed.
+9. **Ingress IP allowlist trusts `X-Forwarded-For` only when behind a TLS terminator.** `SECRET_PROXY_ALLOWED_CLIENT_CIDRS` reads the rightmost XFF entry when `SECRET_PROXY_TRUST_TLS_TERMINATOR=1`, which assumes the terminator overwrites/appends XFF from the real TCP source. Without the terminator flag, the allowlist matches the TCP `RemoteAddr` instead — on a PaaS that means the edge LB IP, which is _not_ the client. Don't enable the allowlist behind a terminator without enabling terminator trust, and vice-versa: a misconfigured pair fails open against the wrong identity.
 
 ### 5.2 Out of Scope at v1
 
 Items not built in v1. Rationale recorded where a future contributor might reopen the decision.
 
-- **Additive features without rationale:** IP CIDR allowlist; rate limiting; request body size cap; OAuth/HMAC/body/SigV4/macaroon processors; multi-processor chains; response-side credential extraction; web UI / control plane.
+- **Additive features without rationale:** rate limiting; request body size cap; OAuth/HMAC/body/SigV4/macaroon processors; multi-processor chains; response-side credential extraction; web UI / control plane.
+- **Ingress IP CIDR allowlist** — _promoted in v1.x_, see `SECRET_PROXY_ALLOWED_CLIENT_CIDRS` in §4.1. Rationale: a public PaaS deployment exposes `/v1/forward` to the internet, and the seal+bearer pair is the only ingress check. Operators who run the proxy from a known set of client-app egress IPs (NAT pool, VPC NAT gateway, fixed-egress add-on) can shrink the attack surface to those IPs without changing the wire protocol. Defaults to off (empty list) so existing deployments are unaffected.
 - **Absolute-form HTTP forward-proxy protocol** (§3.1) — considered during prototyping for transparent `HTTP_PROXY` env-var integration with vendor SDKs. Dropped because reverse-proxy CDNs (Cloudflare, the layer in front of every PaaS Web Service) reject absolute-form HTTP at the edge, making PaaS deployments impossible. The relative-URL `/v1/forward` envelope traverses any CDN.
 - **`CONNECT` MITM mode** (§3.1) — adds on-the-fly cert minting + CA distribution; revisit when a vendor SDK refuses to be wrapped via `pkg/client`.
 - **`inject_basic_auth` processor** (§2.4) — pre-encoding `user:pass` at seal time keeps the processor surface single-purpose.

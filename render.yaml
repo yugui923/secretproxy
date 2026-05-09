@@ -45,3 +45,12 @@ services:
       # SECRET_PROXY_PRIVATE_KEY — Curve25519 private key, hex.
       - key: SECRET_PROXY_PRIVATE_KEY
         sync: false
+
+      # SECRET_PROXY_ALLOWED_CLIENT_CIDRS — comma-separated CIDR / bare IP
+      # ingress allowlist on /v1/forward (e.g.
+      # "203.0.113.0/24,2001:db8::/32"). Empty/unset = off. Because
+      # TRUST_TLS_TERMINATOR is on above, the proxy reads the rightmost
+      # X-Forwarded-For entry — list the public egress IPs of your client
+      # apps. See spec §5.1 footgun #9 for the trust model.
+      - key: SECRET_PROXY_ALLOWED_CLIENT_CIDRS
+        sync: false

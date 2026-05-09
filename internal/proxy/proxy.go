@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -77,6 +78,12 @@ type Server struct {
 	SelfHostnames      map[string]struct{}
 	Logger             *slog.Logger
 
+	// AllowedClientCIDRs gates ingress to /v1/forward. Empty = off.
+	AllowedClientCIDRs []netip.Prefix
+	// TrustTLSTerminator mirrors --trust-tls-terminator and tells the
+	// ingress check to read the rightmost X-Forwarded-For entry.
+	TrustTLSTerminator bool
+
 	Transport http.RoundTripper
 
 	DisableEgressGuard bool
@@ -124,6 +131,18 @@ func (s *Server) handlePublicKey(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+
+	if len(s.AllowedClientCIDRs) > 0 {
+		ip, err := clientIPFromRequest(r, s.TrustTLSTerminator)
+		if err != nil {
+			s.respondError(w, r, http.StatusForbidden, "client ip not allowed", err, start, nil)
+			return
+		}
+		if !ipInPrefixes(ip, s.AllowedClientCIDRs) {
+			s.respondError(w, r, http.StatusForbidden, "client ip not allowed", fmt.Errorf("ip %s not in allowlist", ip), start, []any{"client_ip", ip.String()})
+			return
+		}
+	}
 
 	upstreamRaw := r.Header.Get(HeaderUpstreamURL)
 	if upstreamRaw == "" {
