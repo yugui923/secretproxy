@@ -133,11 +133,16 @@ SECRET_PROXY_PUBLIC_KEY=$(curl -s https://<your-proxy>.example.com/public-key) \
 secret-proxy seal \
   --token             "sk_live_xxx" \
   --auth-bearer       "<bearer-the-client-app-will-present>" \
+  --name              "stripe-prod-charges" \
   --allow-host        "api.stripe.com" \
   --allow-path-prefix "/v1/charges" \
   --allow-method      "POST"
+# stderr: euid: <UUIDv4>   (auto-generated; record this — it appears in
+#         name: <label>     every proxy log line for this credential)
 # stdout: <base64 sealed secret> — give to the client app as SEALED_SECRET
 ```
+
+`--name` is optional; `--euid` is too (auto-stamped UUIDv4 when omitted, override only for tests/imports). Both fields are observability-only — they participate in no auth or validation. Every `proxied` log line carries `seal_euid` and `seal_name`, so an operator seeing a vendor-side anomaly can grep logs back to the exact sealed credential without the token ever appearing.
 
 Sealed-secret schema, host/path/method validators, runtime overrides: [§2](docs/specs/2026-05-08-secret-proxy.md#2-sealed-secret).
 
