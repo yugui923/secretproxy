@@ -92,8 +92,18 @@ func clientIPFromRequest(r *http.Request, trustTerminator, trustCloudflare bool)
 		return parseIPMaybePort(cfIP)
 	}
 	if trustTerminator {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
+		// Header.Values (not Get): HTTP/1.1 allows multiple X-Forwarded-For
+		// header lines, and Go's net/http stores each line as a separate
+		// entry. An attacker who can inject a header line could otherwise
+		// send `X-Forwarded-For: 10.0.0.1` (their forged value), the
+		// terminator appends `X-Forwarded-For: <real-client-ip>` as a new
+		// header line, and Get() returns only the first one — the
+		// attacker's choice. Walk all header values and take the rightmost
+		// token of the rightmost line: that's the entry the trusted
+		// terminator most recently appended.
+		if xffLines := r.Header.Values("X-Forwarded-For"); len(xffLines) > 0 {
+			lastLine := xffLines[len(xffLines)-1]
+			parts := strings.Split(lastLine, ",")
 			candidate := strings.TrimSpace(parts[len(parts)-1])
 			if candidate == "" {
 				// "1.2.3.4, " (trailing comma — common from misconfigured

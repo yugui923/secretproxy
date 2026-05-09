@@ -85,6 +85,45 @@ func TestClientIPFromRequest_xffIgnoredWhenUntrusted(t *testing.T) {
 	}
 }
 
+// TestClientIPFromRequest_xffMultipleHeaderLines locks down the rule that the
+// rightmost-of-rightmost rule walks ALL X-Forwarded-For header lines, not just
+// the first. HTTP/1.1 allows multiple X-Forwarded-For lines and Go's net/http
+// preserves them as separate Header values. An attacker who can inject a
+// header line into the request would otherwise send their forged XFF first
+// and have the terminator append the real IP as a new line; Header.Get only
+// returned the first (attacker-controlled) line.
+func TestClientIPFromRequest_xffMultipleHeaderLines(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
+	req.RemoteAddr = "10.0.0.1:443"                  // edge LB
+	req.Header.Add("X-Forwarded-For", "1.2.3.4")     // attacker-supplied first line
+	req.Header.Add("X-Forwarded-For", "203.0.113.7") // terminator-appended second line
+	addr, err := clientIPFromRequest(req, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr.String() != "203.0.113.7" {
+		t.Fatalf("want rightmost-of-rightmost 203.0.113.7 (terminator-set), got %s — attacker's first XFF won", addr)
+	}
+}
+
+// TestClientIPFromRequest_xffMultipleHeaderLinesWithChain combines the multi-
+// line case with a chained value in the last line (e.g. terminator appended
+// "client, intermediate" rather than just one IP). Rightmost-of-rightmost
+// still picks the trustworthy hop.
+func TestClientIPFromRequest_xffMultipleHeaderLinesWithChain(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/forward", nil)
+	req.RemoteAddr = "10.0.0.1:443"
+	req.Header.Add("X-Forwarded-For", "spoofed.first.line.bytes")
+	req.Header.Add("X-Forwarded-For", "1.2.3.4, 198.51.100.9, 203.0.113.7")
+	addr, err := clientIPFromRequest(req, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr.String() != "203.0.113.7" {
+		t.Fatalf("want rightmost-of-rightmost 203.0.113.7, got %s", addr)
+	}
+}
+
 // TestClientIPFromRequest_xffTrailingCommaFailsClosed prevents a regression
 // where "1.2.3.4, " (trailing comma — common from misconfigured terminators)
 // used to fall through to RemoteAddr. Behind a terminator RemoteAddr is the
