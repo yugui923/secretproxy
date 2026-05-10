@@ -113,7 +113,12 @@ Independent of either allowlist, any decoded path containing a `.` or `..`
 segment is refused before the allowlist runs. `url.Parse` decodes `%2e%2e` to
 `..` in the `Path` field but does not normalize, so a literal prefix or regex
 match would otherwise admit `/v1/charges/../admin` and let the upstream resolve
-it to `/admin`.
+it to `/admin`. The guard unescapes iteratively (up to four rounds) so a
+double-encoded variant like `/v1/charges/abc%252F..%252Fadmin` — which
+`url.Parse` decodes to `/v1/charges/abc%2F..%2Fadmin` and which some
+upstreams further decode to `/admin` — is refused on its second decode pass.
+Inputs whose percent-encoding is invalid (`%xy` where `xy` aren't hex) are
+also refused.
 
 **Method** (optional):
 

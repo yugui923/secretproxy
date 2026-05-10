@@ -590,10 +590,19 @@ func validatePath(path string, secret *seal.Secret) error {
 	// path like /v1/charges/../admin which the upstream could then resolve to
 	// /admin. Refused unconditionally — no legitimate vendor URL needs dot
 	// segments.
-	for _, seg := range strings.Split(path, "/") {
-		if seg == "." || seg == ".." {
-			return fmt.Errorf("path %q contains %q segment", path, seg)
-		}
+	//
+	// Iterative unescape closes the double-encoded variant: an attacker
+	// who sends /v1/charges/abc%252F..%252Fadmin gets a one-round
+	// url.Parse decode to /v1/charges/abc%2F..%2Fadmin (no dot segment
+	// after split-on-"/"), which then survives the surface check. Some
+	// upstreams URL-decode again (or treat %2F as a path separator) and
+	// resolve back to /admin. Decode until stable, refusing on any
+	// intermediate form that exposes a dot segment. The allowlist
+	// matching that follows still runs against the wire-form path (the
+	// one url.Parse produced) — that is the form actually forwarded to
+	// the upstream, so it is the correct surface to scope.
+	if err := refuseDotSegments(path); err != nil {
+		return err
 	}
 	if len(secret.AllowedPathPrefixes) > 0 {
 		for _, p := range secret.AllowedPathPrefixes {
@@ -620,6 +629,31 @@ func validatePath(path string, secret *seal.Secret) error {
 		}
 	}
 	return nil
+}
+
+// refuseDotSegments unescapes path repeatedly and rejects the first form
+// that contains a "." or ".." segment. Caps the iteration count so a
+// malicious input that doesn't converge can't burn CPU. Vendor URLs in
+// practice never need more than one decode; the cap is a safety bound.
+func refuseDotSegments(path string) error {
+	const maxDecodes = 4
+	current := path
+	for i := 0; i <= maxDecodes; i++ {
+		for _, seg := range strings.Split(current, "/") {
+			if seg == "." || seg == ".." {
+				return fmt.Errorf("path %q contains %q segment after %d decodes", path, seg, i)
+			}
+		}
+		next, err := url.PathUnescape(current)
+		if err != nil {
+			return fmt.Errorf("path %q: invalid percent-encoding: %w", path, err)
+		}
+		if next == current {
+			return nil
+		}
+		current = next
+	}
+	return fmt.Errorf("path %q: percent-encoding decode did not stabilize within %d rounds", path, maxDecodes)
 }
 
 func validateMethod(method string, secret *seal.Secret) error {

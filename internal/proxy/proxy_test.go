@@ -277,6 +277,117 @@ func TestValidatePath_percentDecodedTraversal(t *testing.T) {
 	}
 }
 
+// TestValidatePath_doubleEncodedTraversal locks the FIND-004 fix: an
+// attacker double-encodes %2F as %252F and the literal ".." as %252E%252E.
+// url.Parse runs one round of decoding so upstream.Path becomes
+// /v1/charges/abc%2F..%2Fadmin (or %2E%2E for the dot-segment variant) —
+// which has NO ".." segment after split-on-"/". Some upstreams URL-decode
+// again and resolve to /admin. refuseDotSegments must unescape until
+// stable and refuse on any intermediate form that exposes the traversal.
+func TestValidatePath_doubleEncodedTraversal(t *testing.T) {
+	cases := []string{
+		// Double-encoded slash + literal ".." — collapses on second decode.
+		"/v1/charges/abc%2F..%2Fadmin",
+		// Double-encoded ".." — collapses on second decode.
+		"/v1/charges/%252E%252E/admin",
+		// Triple-encoded — within the maxDecodes safety bound.
+		"/v1/charges/%25252E%25252E/admin",
+		// Mixed: encoded slash and encoded dot segments.
+		"/v1/charges/%252F%252E%252E/admin",
+	}
+	s := &seal.Secret{AllowedPathPrefixes: []string{"/v1/charges"}}
+	for _, raw := range cases {
+		u, err := url.Parse("https://api.example.com" + raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if err := validatePath(u.Path, s); err == nil {
+			t.Errorf("double-encoded traversal %q must be rejected (Path = %q)", raw, u.Path)
+		}
+	}
+}
+
+// TestRefuseDotSegments_overlongAndBackslash exercises edge cases the
+// iterative-decode guard must NOT silently allow. Overlong UTF-8
+// encodings (%C0%AE for ".") are not decoded by url.PathUnescape, so they
+// reach the upstream as opaque bytes — the guard correctly does not
+// recognize them as ".", and that's the documented contract: vendor APIs
+// do not legitimately use such encodings, and Go's url.PathUnescape's
+// stdlib semantics are the contract surface. Backslash variants
+// (%5C..%5C) are likewise opaque to Go's "/"-only segment splitter; the
+// proxy does not promise Windows-style separator collapsing because no
+// real vendor URL needs it.
+func TestRefuseDotSegments_overlongAndBackslash(t *testing.T) {
+	for _, p := range []string{"/v1/foo/%C0%AE%C0%AE/bar", "/v1/foo/%5C..%5C/bar"} {
+		// These should NOT be refused by refuseDotSegments — Go does not
+		// decode them into "..". Lock in the absence-of-spurious-rejection.
+		if err := refuseDotSegments(p); err != nil {
+			t.Errorf("refuseDotSegments(%q) should not refuse opaque non-/ separators, got %v", p, err)
+		}
+	}
+}
+
+// TestRefuseDotSegments_runaway lock the safety bound. Construct a path
+// that re-introduces "%" via repeated decoding and verify the guard
+// errors out rather than looping. This shape doesn't appear in
+// validatePath today via url.Parse output, but the helper is exported in
+// scope to refuseDotSegments and a future caller could feed it directly.
+func TestRefuseDotSegments_runaway(t *testing.T) {
+	// "%2525252525252e%2525252525252e" decodes one "%25" per round; far
+	// more than the 4-round cap.
+	p := "/v1/foo/%2525252525252e%2525252525252e/bar"
+	err := refuseDotSegments(p)
+	if err == nil {
+		t.Fatal("expected refusal: input requires more decodes than the safety bound")
+	}
+	if !strings.Contains(err.Error(), "did not stabilize") && !strings.Contains(err.Error(), "..") {
+		t.Fatalf("expected stabilization or dot-segment error, got %v", err)
+	}
+}
+
+// TestValidatePath_legitimatePercentEncoded confirms the iterative-decode
+// guard does NOT regress on legitimate single-decoded percent characters
+// (spaces in identifiers, UTF-8 bytes, etc.). The guard refuses dot
+// segments specifically, not any "%" appearance.
+func TestValidatePath_legitimatePercentEncoded(t *testing.T) {
+	s := &seal.Secret{}
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"already_decoded_space", "/v1/customers/cus%20123"},
+		{"encoded_utf8_checkmark", "/v1/things/%E2%9C%93/active"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse("https://api.example.com" + tc.raw)
+			if err != nil {
+				t.Fatalf("url.Parse(%q): %v — test premise broken", tc.raw, err)
+			}
+			if err := validatePath(u.Path, s); err != nil {
+				t.Errorf("legit path %q (Path=%q) wrongly refused: %v", tc.raw, u.Path, err)
+			}
+		})
+	}
+}
+
+// TestRefuseDotSegments_invalidPercentEncoding asserts the helper refuses
+// rather than silently accepts on input whose percent-encoding fails to
+// decode. url.Parse rejects "%zz" at the input boundary today, so the
+// proxy doesn't see it via the wire path — but the helper is exposed in
+// scope and a future caller could feed it raw bytes (e.g., a
+// pkg/client-side validation). Refusing closed is the documented
+// contract; this test locks it in.
+func TestRefuseDotSegments_invalidPercentEncoding(t *testing.T) {
+	err := refuseDotSegments("/v1/items/abc%zz")
+	if err == nil {
+		t.Fatal("expected refusal for invalid percent-encoding")
+	}
+	if !strings.Contains(err.Error(), "invalid percent-encoding") {
+		t.Fatalf("expected invalid-percent-encoding error, got %v", err)
+	}
+}
+
 // Case-insensitivity is locked in by TestValidateHost_caseInsensitive above
 // (FIND-003). Mismatches must still be rejected on different hostnames, not
 // on case differences alone.
