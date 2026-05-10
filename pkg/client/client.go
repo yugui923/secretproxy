@@ -22,7 +22,16 @@ import (
 	"net/url"
 )
 
-const ForwardPath = "/v1/forward"
+// Wire-protocol constants for the v1 forward endpoint (spec §3.1). The
+// pkg/client package is the public surface for the wire contract; the
+// server side (internal/proxy) imports these so a header rename can't
+// silently desync client and server.
+const (
+	ForwardPath        = "/v1/forward"
+	HeaderUpstreamURL  = "X-Upstream-URL"
+	HeaderSealedSecret = "X-Sealed-Secret"
+	HeaderAuthBearer   = "X-Auth-Bearer"
+)
 
 type Option func(*transport)
 
@@ -78,12 +87,12 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	clone.Host = t.proxyURL.Host
 	clone.RequestURI = ""
 
-	clone.Header.Set("X-Upstream-URL", upstreamURL)
+	clone.Header.Set(HeaderUpstreamURL, upstreamURL)
 	if t.sealedSecret != "" {
-		clone.Header.Set("X-Sealed-Secret", t.sealedSecret)
+		clone.Header.Set(HeaderSealedSecret, t.sealedSecret)
 	}
 	if t.auth != "" {
-		clone.Header.Set("X-Auth-Bearer", "Bearer "+t.auth)
+		clone.Header.Set(HeaderAuthBearer, "Bearer "+t.auth)
 	}
 
 	return t.base.RoundTrip(clone)

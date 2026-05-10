@@ -37,17 +37,22 @@ import (
 	"time"
 
 	"github.com/yugui923/secretproxy/internal/seal"
+	"github.com/yugui923/secretproxy/pkg/client"
 )
 
+// Wire-protocol header names and the forward path are owned by pkg/client
+// (the public surface for the wire contract) so client and server can't
+// drift. Re-exported here as package-level constants for callers/tests
+// inside internal/proxy that already use the unqualified names.
 const (
-	HeaderUpstreamURL  = "X-Upstream-URL"
-	HeaderSealedSecret = "X-Sealed-Secret"
-	HeaderAuthBearer   = "X-Auth-Bearer"
+	HeaderUpstreamURL  = client.HeaderUpstreamURL
+	HeaderSealedSecret = client.HeaderSealedSecret
+	HeaderAuthBearer   = client.HeaderAuthBearer
+	ForwardPath        = client.ForwardPath
 
 	PublicKeyPath = "/public-key"
 	HealthPath    = "/healthz"
 	ReadyPath     = "/readyz"
-	ForwardPath   = "/v1/forward"
 
 	UpstreamPort = "443"
 )
