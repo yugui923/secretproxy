@@ -37,6 +37,63 @@ func TestValidate_dualAuth(t *testing.T) {
 	}
 }
 
+// TestValidate_refusesControlCharsInHeaderValues locks the FIND-007 fix:
+// CR / LF / NUL in any value that flows into an outbound HTTP header is
+// refused at seal time. Without this, an operator pasting a stray newline
+// into --token (common when copying from a multi-line secret store dump)
+// would land a seal that crashes the proxy at request time with a Go
+// header-write panic, surfacing as a 500-style server error rather than
+// a clean seal-time validation failure.
+func TestValidate_refusesControlCharsInHeaderValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Secret)
+	}{
+		{"token_with_LF", func(s *Secret) { s.InjectHeader.Token = "sk_live_xxx\nattacker: header" }},
+		{"token_with_CR", func(s *Secret) { s.InjectHeader.Token = "sk_live_xxx\rattacker" }},
+		{"token_with_NUL", func(s *Secret) { s.InjectHeader.Token = "sk_live_xxx\x00more" }},
+		{"token_with_SOH", func(s *Secret) { s.InjectHeader.Token = "sk_live_xxx\x01more" }},
+		{"token_with_DEL", func(s *Secret) { s.InjectHeader.Token = "sk_live_xxx\x7Fmore" }},
+		{"format_with_LF", func(s *Secret) { s.InjectHeader.Format = "Bearer %s\n" }},
+		{"header_name_with_CR", func(s *Secret) { s.InjectHeader.HeaderName = "X-Auth\r" }},
+		{"allowed_formats_LF", func(s *Secret) { s.InjectHeader.AllowedFormats = []string{"%s", "Bearer %s\n"} }},
+		{"allowed_header_names_NUL", func(s *Secret) {
+			s.InjectHeader.AllowedHeaderNames = []string{"X-Auth\x00"}
+		}},
+		{"allowed_header_names_DEL", func(s *Secret) {
+			s.InjectHeader.AllowedHeaderNames = []string{"X-Auth\x7F"}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := validSecret()
+			tc.mutate(s)
+			if err := s.Validate(); err == nil {
+				t.Fatal("expected refusal")
+			}
+		})
+	}
+}
+
+// TestValidate_acceptsHighBitAndPunctuation confirms the control-char
+// guard does not over-reach: high-bit UTF-8 bytes and ASCII punctuation
+// that legitimately appear in tokens (=, /, +, .) must not be refused.
+// Tab is also accepted because net/http permits it in header values.
+func TestValidate_acceptsHighBitAndPunctuation(t *testing.T) {
+	for _, tok := range []string{
+		"sk_live_AbCdEf-1234567890",
+		"Bearer-style+token=padded/safe",
+		"vendor.utf8.é.中",
+		"token\twith\ttabs", // tab is allowed per RFC 7230
+	} {
+		s := validSecret()
+		s.InjectHeader.Token = tok
+		if err := s.Validate(); err != nil {
+			t.Errorf("legitimate token %q rejected: %v", tok, err)
+		}
+	}
+}
+
 func TestValidate_missingProcessor(t *testing.T) {
 	s := validSecret()
 	s.InjectHeader = nil

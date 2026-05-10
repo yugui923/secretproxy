@@ -174,8 +174,61 @@ func (s *Secret) Validate() error {
 	if s.BearerAuth != nil && s.BearerAuth.Digest == "" {
 		return errors.New("seal: bearer_auth.digest required")
 	}
-	if s.InjectHeader != nil && s.InjectHeader.Token == "" {
-		return errors.New("seal: inject_header.token required")
+	if s.InjectHeader != nil {
+		if s.InjectHeader.Token == "" {
+			return errors.New("seal: inject_header.token required")
+		}
+		// Refuse control characters in any value that flows into an
+		// outbound HTTP header (header name, format string, token, plus
+		// the override allowlists). net/http panics or refuses requests
+		// with CR/LF in header values rather than smuggling them, so the
+		// failure mode without this check is a 500-style runtime panic
+		// rather than a clean rejection at seal time. Operators paste
+		// stray CR/LF (or NULs) into tokens often enough that catching
+		// it at seal time is worth the cheap scan.
+		for label, v := range map[string]string{
+			"inject_header.token":       s.InjectHeader.Token,
+			"inject_header.format":      s.InjectHeader.Format,
+			"inject_header.header_name": s.InjectHeader.HeaderName,
+		} {
+			if err := refuseHeaderControlChars(label, v); err != nil {
+				return err
+			}
+		}
+		for i, v := range s.InjectHeader.AllowedFormats {
+			if err := refuseHeaderControlChars(fmt.Sprintf("inject_header.allowed_formats[%d]", i), v); err != nil {
+				return err
+			}
+		}
+		for i, v := range s.InjectHeader.AllowedHeaderNames {
+			if err := refuseHeaderControlChars(fmt.Sprintf("inject_header.allowed_header_names[%d]", i), v); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// refuseHeaderControlChars rejects values that Go's net/http header
+// writer would reject at request time. Mirrors http.validHeaderFieldValue:
+// any C0 control byte (< 0x20) except horizontal tab (0x09), plus DEL
+// (0x7F). High-bit bytes are allowed (legitimate UTF-8 in tokens). The
+// goal is to fail at seal time rather than land a seal that surfaces as
+// a 500-style runtime header-write failure on first use.
+//
+// Iterating runes is safe even though the rule is byte-oriented: every
+// rejected byte (0x00–0x1F, 0x7F) is single-byte ASCII and cannot appear
+// as a continuation byte inside a multi-byte UTF-8 sequence (those are
+// 0x80–0xBF), so a malformed byte cannot hide inside a multi-byte
+// codepoint.
+func refuseHeaderControlChars(label, v string) error {
+	for _, r := range v {
+		if r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7F {
+			return fmt.Errorf("seal: %s contains control character %q", label, r)
+		}
 	}
 	return nil
 }
