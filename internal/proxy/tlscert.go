@@ -63,7 +63,7 @@ func GenerateSelfSignedTLS(outDir string, extraSANs []string) (certPath, keyPath
 
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "secret-proxy-dev"},
+		Subject:               pkix.Name{CommonName: DevCertCommonName},
 		NotBefore:             time.Now().Add(-1 * time.Hour),
 		NotAfter:              time.Now().Add(90 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
