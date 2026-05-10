@@ -186,9 +186,17 @@ func TestRejectNonStandardPort(t *testing.T) {
 	cases := map[string]bool{
 		"api.stripe.com":      true,
 		"api.stripe.com:443":  true,
+		"[::1]:443":           true, // IPv6 bracketed, valid form
 		"api.stripe.com:80":   false,
 		"api.stripe.com:8080": false,
 		"":                    false,
+		// Post-review: malformed bracketed forms used to fall through to
+		// "no port = OK" and pass validation. Refuse instead.
+		"[::1":           false,
+		"[::1]":          false, // bracket without explicit port
+		"api:stripe:com": false, // multiple colons, ambiguous
+		"::1":            false, // unbracketed IPv6 — ambiguous to SplitHostPort
+		"[fe80::1%eth0]": false, // zone ID without port
 	}
 	for in, ok := range cases {
 		err := rejectNonStandardPort(in)

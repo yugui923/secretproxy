@@ -568,6 +568,16 @@ func rejectNonStandardPort(host string) error {
 	}
 	_, port, err := net.SplitHostPort(host)
 	if err != nil {
+		// SplitHostPort errors on (a) hosts with no port, which is the
+		// expected "default to 443" case, and (b) malformed inputs like
+		// "[::1" (unclosed bracket) or stray colons. Distinguish: if the
+		// host looks bracketed or contains anything that should have
+		// parsed as IPv6, treat it as malformed and refuse — letting it
+		// through means stripPort silently passes the broken value down
+		// the dial path.
+		if strings.ContainsAny(host, "[]") || strings.Count(host, ":") > 1 {
+			return fmt.Errorf("malformed host %q: %w", host, err)
+		}
 		return nil
 	}
 	if port != UpstreamPort {
