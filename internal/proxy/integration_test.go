@@ -917,6 +917,92 @@ func TestIntegration_NonStandardPortRejected(t *testing.T) {
 	}
 }
 
+// TestIntegration_MaxRequestBytes_ContentLengthRefused confirms a request
+// with a Content-Length over the cap is refused with 413 before any forwarding
+// work runs. Without the cap, footgun #8 (slowloris on body) is wide open.
+func TestIntegration_MaxRequestBytes_ContentLengthRefused(t *testing.T) {
+	upstream, captured := newUpstream(t)
+	defer upstream.Close()
+	p := setupProxy(t, upstream)
+	defer p.stop()
+	p.srv.MaxRequestBytes = 1024
+
+	blob := sealStripeLike(t, p.pub)
+	rt, _ := client.NewTransport(p.url,
+		client.WithSealedSecret(blob),
+		client.WithAuth("client-token"),
+		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
+	)
+	c := &http.Client{Transport: rt, Timeout: 5 * time.Second}
+
+	body := bytes.Repeat([]byte("A"), 2048)
+	req, _ := http.NewRequest("POST", "https://api.example.com/v1/charges", bytes.NewReader(body))
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", resp.StatusCode)
+	}
+	select {
+	case got := <-captured:
+		t.Fatalf("upstream should not have received the request, got %s %s", got.method, got.path)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestIntegration_MaxRequestBytes_StreamedOverflow confirms that a chunked
+// (no Content-Length) body which exceeds the cap mid-stream fails closed —
+// the proxy does NOT forward the full body successfully. The upstream may
+// or may not see a partial; what it MUST NOT see is a fully-relayed request
+// that completed normally past the cap.
+func TestIntegration_MaxRequestBytes_StreamedOverflow(t *testing.T) {
+	upstream, captured := newUpstream(t)
+	defer upstream.Close()
+	p := setupProxy(t, upstream)
+	defer p.stop()
+	const cap = 512
+	const overflow = 4096
+	p.srv.MaxRequestBytes = cap
+
+	blob := sealStripeLike(t, p.pub)
+	rt, _ := client.NewTransport(p.url,
+		client.WithSealedSecret(blob),
+		client.WithAuth("client-token"),
+		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
+	)
+	c := &http.Client{Transport: rt, Timeout: 5 * time.Second}
+
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		// Stream chunked > cap; if MaxBytesReader is wired, the upstream copy
+		// stops before all bytes flow.
+		_, _ = pw.Write(bytes.Repeat([]byte("A"), overflow))
+	}()
+	req, _ := http.NewRequest("POST", "https://api.example.com/v1/charges", pr)
+	req.ContentLength = -1
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for over-cap streamed body, got %d", resp.StatusCode)
+	}
+	// Belt-and-suspenders: if upstream did somehow receive the full body, the
+	// cap silently no-op'd and that's a regression worth flagging even with a
+	// 413 status (e.g., 413 came from somewhere else).
+	select {
+	case got := <-captured:
+		if len(got.body) > cap {
+			t.Fatalf("upstream got %d bytes (cap=%d); MaxRequestBytes did not bound chunked body", len(got.body), cap)
+		}
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
 // TestIntegration_CloudflareHeadersStrippedFromUpstream confirms that with
 // TrustCloudflareHeaders=true, the CF-* / True-Client-IP set is removed from
 // the request before it reaches the vendor API. Otherwise the proxy would

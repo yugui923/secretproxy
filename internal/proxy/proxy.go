@@ -98,6 +98,13 @@ type Server struct {
 	// unreachable except via Cloudflare — see §5.1 footgun #9.
 	TrustCloudflareHeaders bool
 
+	// MaxRequestBytes caps the per-request body size. Zero disables the cap.
+	// Requests with a known Content-Length above the cap are refused with
+	// 413 before any forwarding work; chunked bodies are bounded mid-stream
+	// via http.MaxBytesReader, which closes the upstream connection on
+	// overflow.
+	MaxRequestBytes int64
+
 	Transport http.RoundTripper
 
 	DisableEgressGuard bool
@@ -152,6 +159,14 @@ func (s *Server) handlePublicKey(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+
+	if s.MaxRequestBytes > 0 {
+		if r.ContentLength > s.MaxRequestBytes {
+			s.respondError(w, r, http.StatusRequestEntityTooLarge, "request body too large", fmt.Errorf("content-length %d exceeds %d", r.ContentLength, s.MaxRequestBytes), start, nil)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, s.MaxRequestBytes)
+	}
 
 	if len(s.AllowedClientCIDRs) > 0 {
 		ip, err := clientIPFromRequest(r, s.TrustTLSTerminator, s.TrustCloudflareHeaders)
@@ -334,6 +349,18 @@ func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url
 				// metric bucket as a vendor outage.
 				s.Logger.Warn("egress_refused_at_dial", "error", err.Error())
 				http.Error(w, "egress refused", http.StatusForbidden)
+				return
+			}
+			// MaxBytesReader trips here when a chunked body overflows mid-
+			// stream (the Content-Length path is rejected earlier in
+			// handleForward). Without the explicit detect, a client-driven
+			// overflow lands in the upstream_error / 502 bucket alongside
+			// real vendor outages — same observability problem the egress-
+			// refused split solves.
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				s.Logger.Warn("request_too_large_streamed", "limit", mbe.Limit, "error", err.Error())
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 				return
 			}
 			s.Logger.Warn("upstream_error", "error", err.Error())

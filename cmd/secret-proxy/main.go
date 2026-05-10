@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -95,6 +96,21 @@ func runServe(args []string) error {
 	trustTermFlag := fs.Bool("trust-tls-terminator", envBool("SECRET_PROXY_TRUST_TLS_TERMINATOR"), "Listen plaintext (only safe when fronted by a TLS terminator: PaaS edge LB, mesh, ingress)")
 	allowedCIDRsFlag := fs.String("allowed-client-cidrs", allowedCIDRsEnv, "Comma-separated ingress IP allowlist on /v1/forward (CIDR or bare IP)")
 	trustCFFlag := fs.Bool("trust-cloudflare-headers", envBool("SECRET_PROXY_TRUST_CLOUDFLARE_HEADERS"), "Behind Cloudflare: read CF-Connecting-IP for the ingress allowlist and strip CF-* trust headers from upstream forwarding. Requires --trust-tls-terminator.")
+	maxBytesDefault, err := envInt64("SECRET_PROXY_MAX_REQUEST_BYTES", 10*1024*1024)
+	if err != nil {
+		return err
+	}
+	maxBytesFlag := fs.Int64("max-request-bytes", maxBytesDefault, "Per-request body size cap in bytes; 0 disables")
+	readTimeoutDefault, err := envDuration("SECRET_PROXY_READ_TIMEOUT", 60*time.Second)
+	if err != nil {
+		return err
+	}
+	readTimeoutFlag := fs.Duration("read-timeout", readTimeoutDefault, "Per-request read timeout (header + body); 0 disables. Default 60s. Tune up for large slow uploads.")
+	idleTimeoutDefault, err := envDuration("SECRET_PROXY_IDLE_TIMEOUT", 120*time.Second)
+	if err != nil {
+		return err
+	}
+	idleTimeoutFlag := fs.Duration("idle-timeout", idleTimeoutDefault, "Keep-alive idle timeout; 0 disables. Default 120s.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -136,13 +152,26 @@ func runServe(args []string) error {
 		AllowedClientCIDRs:     allowedCIDRs,
 		TrustTLSTerminator:     *trustTermFlag,
 		TrustCloudflareHeaders: *trustCFFlag,
+		MaxRequestBytes:        *maxBytesFlag,
 		Logger:                 logger,
 	}
 
+	// ReadTimeout bounds the full request read (header + body) by wall clock
+	// and closes the slowloris-on-body vector that ReadHeaderTimeout alone
+	// leaves open. The trade-off: a legitimate slow/large upload (multi-MB
+	// body, slow client link) is also cut off at the deadline. Tune via
+	// --read-timeout / SECRET_PROXY_READ_TIMEOUT, or pass 0 to disable when
+	// the deployment expects long-running uploads and accepts the slowloris
+	// risk (combine with --max-request-bytes to keep the byte ceiling).
+	// IdleTimeout reaps keep-alive sockets from disappeared clients.
+	// WriteTimeout is intentionally unset — bounding it would cap legitimate
+	// streamed responses (server-sent events, large vendor downloads).
 	server := &http.Server{
 		Addr:              *listenAddr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       *readTimeoutFlag,
+		IdleTimeout:       *idleTimeoutFlag,
 	}
 	if !*trustTermFlag {
 		server.TLSConfig = &tls.Config{
@@ -492,4 +521,34 @@ func envOr(key, fallback string) string {
 func envBool(key string) bool {
 	v := strings.ToLower(os.Getenv(key))
 	return v == "1" || v == "true" || v == "yes"
+}
+
+// envInt64 returns the parsed env value when set, the fallback when unset,
+// and an error when set-but-unparseable. Failing fast on a typo (e.g.
+// "10mb") beats silently booting with a default that doesn't match what the
+// operator wrote in the dashboard.
+func envInt64(key string, fallback int64) (int64, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q: %w", key, v, err)
+	}
+	return n, nil
+}
+
+// envDuration mirrors envInt64 for time.ParseDuration values (e.g. "60s",
+// "2m"). Same fail-fast contract.
+func envDuration(key string, fallback time.Duration) (time.Duration, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q: %w", key, v, err)
+	}
+	return d, nil
 }
