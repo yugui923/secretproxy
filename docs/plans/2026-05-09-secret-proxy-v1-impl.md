@@ -195,3 +195,7 @@ Cases:
 - A live deployment behind a reverse-proxy CDN (Render Web Service) returns 200 on `/healthz`, the published public key on `/public-key`, and successfully forwards a sealed request through to a public upstream.
 
 Stop when the above are green.
+
+---
+
+**Update (post-v1.0).** This plan documents the v1.0 implementation. Several capabilities have landed since: ingress IP allowlist (`SECRET_PROXY_ALLOWED_CLIENT_CIDRS`), Cloudflare-aware ingress identity (`SECRET_PROXY_TRUST_CLOUDFLARE_HEADERS`), per-seal `name` and `EUID` observability fields, path-traversal guard in `validatePath`, distinct 403 vs 502 bucketing for egress refusals, and `proxied_truncated` logging for mid-stream upstream failures. The canonical reference for these is the spec at [`docs/specs/2026-05-08-secret-proxy.md`](../specs/2026-05-08-secret-proxy.md) — see §1.3, §2.2, §2.6, §4.1, §4.3, §5.1 footgun #9, and §5.2's "promoted in v1.x" entries.

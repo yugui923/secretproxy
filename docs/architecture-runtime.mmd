@@ -3,25 +3,30 @@
 flowchart LR
     Code["App code"] --> Transport["pkg/client<br/>RoundTripper"]
     Transport -->|"POST /v1/forward<br/>X-Upstream-URL<br/>X-Sealed-Secret<br/>X-Auth-Bearer"| Edge["TLS terminator<br/>(PaaS edge or bundled)"]
-    Edge --> Forward[/"/v1/forward handler"/]
+    Edge --> Ingress{"Ingress allowlist<br/>(optional)<br/>CIDR / CF-Connecting-IP"}
+    Ingress -- denied --> R403[/"403 client ip not allowed"/]
+    Ingress -- allowed --> Forward[/"/v1/forward handler"/]
 
     subgraph Proxy["secret-proxy (stateless)"]
         direction TB
         Forward --> Unseal["seal.Open<br/>NaCl box"]
-        Unseal --> Validate["Validate<br/>host • path • method"]
+        Unseal --> Validate["Validate<br/>host • path • method<br/>(refuses . / .. segments)"]
         Validate --> Inject["inject_header<br/>set Authorization"]
-        Inject --> Egress{"Egress guard<br/>private-IP + self-loop"}
+        Inject --> Egress{"Egress guard<br/>private-IP + self-loop<br/>refusal -> 403"}
         PrivKey[("Curve25519<br/>private key")] -.->|reads| Unseal
     end
 
     Egress -->|"HTTPS"| Vendor["Vendor API<br/>(Stripe, Twilio, OpenAI...)"]
     Vendor -.->|"streamed response"| Egress
+    Forward -.->|"INFO proxied<br/>WARN proxied_truncated"| Logs[/"per-request log line<br/>seal_euid + seal_name"/]
 
     classDef store fill:#fef3c7,stroke:#92400e,color:#78350f
     classDef external fill:#e0e7ff,stroke:#3730a3,color:#1e1b4b
     classDef guard fill:#fee2e2,stroke:#991b1b,color:#7f1d1d
     classDef edge fill:#ecfdf5,stroke:#047857,color:#064e3b
+    classDef obs fill:#f5f3ff,stroke:#6d28d9,color:#4c1d95
     class PrivKey store
     class Code,Transport,Vendor external
-    class Egress guard
+    class Ingress,Egress guard
     class Edge edge
+    class Logs obs

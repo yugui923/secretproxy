@@ -22,16 +22,17 @@ This relative-URL envelope was chosen over an absolute-form `HTTP_PROXY`-style p
 
 Rows ordered by mitigation status (Yes → Partial → No):
 
-| Attacker                                     | Mitigated? | How                                                                                                                                                                                         |
-| -------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Reads sealed secrets at rest (config, git)   | Yes        | Useless without the proxy private key.                                                                                                                                                      |
-| Network observer (client → proxy)            | Yes        | TLS 1.3 server-authenticated, either by the proxy itself or by an upstream TLS terminator (§3.2).                                                                                           |
-| Network observer (proxy → upstream)          | Yes        | Forced TLS, system trust store.                                                                                                                                                             |
-| Operator with log access                     | Yes        | All credential, key, and digest fields redacted at marshal time (`Redact`).                                                                                                                 |
-| Steals sealed secret + replays from new host | Partial    | `bearer_auth` digest also requires the matching plaintext token.                                                                                                                            |
-| Steals both sealed secret and bearer token   | Partial    | `allowed_hosts` (+ optional `allowed_path_prefixes` / `allowed_methods`) blocks redirect to attacker-controlled hosts; narrows but does not eliminate abuse via legitimate-shaped requests. |
-| Operator with proxy host access              | Partial    | Plaintext credentials exist transiently in-process; standard host hardening applies.                                                                                                        |
-| Compromises proxy host                       | No         | Curve25519 + TLS private keys in memory; rotate both to recover.                                                                                                                            |
+| Attacker                                     | Mitigated? | How                                                                                                                                                                                                                        |
+| -------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reads sealed secrets at rest (config, git)   | Yes        | Useless without the proxy private key.                                                                                                                                                                                     |
+| Network observer (client → proxy)            | Yes        | TLS 1.3 server-authenticated, either by the proxy itself or by an upstream TLS terminator (§3.2).                                                                                                                          |
+| Network observer (proxy → upstream)          | Yes        | Forced TLS, system trust store.                                                                                                                                                                                            |
+| Operator with log access                     | Yes        | The proxy never logs the unmarshaled `Secret` as a whole; only the `seal_euid` / `seal_name` / `auth` / `processor` fields surface, via `Secret.LogValue`. Tokens, digests, and the sealed blob never appear in log lines. |
+| Steals sealed secret + replays from new host | Partial    | `bearer_auth` digest also requires the matching plaintext token.                                                                                                                                                           |
+| Steals both sealed secret and bearer token   | Partial    | `allowed_hosts` (+ optional `allowed_path_prefixes` / `allowed_methods`) blocks redirect to attacker-controlled hosts; narrows but does not eliminate abuse via legitimate-shaped requests.                                |
+| Crafts upstream URL with `..` path traversal | Yes        | `validatePath` refuses any decoded path containing a `.` or `..` segment before consulting the allowlist; `url.Parse` decodes `%2e%2e` to `..` in `Path` so the guard catches the percent-encoded variant too.             |
+| Operator with proxy host access              | Partial    | Plaintext credentials exist transiently in-process; standard host hardening applies.                                                                                                                                       |
+| Compromises proxy host                       | No         | Curve25519 + TLS private keys in memory; rotate both to recover.                                                                                                                                                           |
 
 ## 2. Sealed Secret
 
@@ -160,6 +161,8 @@ mTLS / client cert auth is out of scope at v1 — bearer tokens carry client ide
 
 **Proxy → upstream:** always TLS, system trust store, no pinning. Non-443 ports are rewritten to 443; per-host port passthrough is deferred (see §5.2).
 
+**Listener wire version:** the proxy's own listener is HTTP/1.1 only (`NextProtos: ["http/1.1"]`, `TLSNextProto` zeroed). HTTP/2 is disabled deliberately: under HTTP/2, `httputil.ReverseProxy` panics with `http.ErrAbortHandler` on body-copy failure and the panic is silently recovered by `net/http`, hiding mid-stream upstream truncations from per-request logs. HTTP/1.1 keeps that signal observable.
+
 ## 4. Operation
 
 ### 4.1 Server Configuration
@@ -219,11 +222,24 @@ Go client library at `pkg/client`: `NewTransport(proxyURL, WithSealedSecret(blob
 
 ### 4.3 Observability
 
-Structured JSON logs, one line per request: `source`, `method`, `host`, `path`, `query_keys` (keys only), `status`, `dur_ms`, `bytes_in`, `bytes_out`, `processor`, `auth`, `seal_euid`, `seal_name`, `error`. `seal_euid` is the per-seal UUIDv4 stamped at seal time; `seal_name` is the operator-supplied label (empty if `--name` was not used). Never log tokens, digests, or keys.
+Structured JSON logs (stdlib `log/slog`), one line per request. The proxy emits one of these event names:
 
-`Redact` invariant: every credential/key/digest field implements `MarshalJSON → "REDACTED"`; the `Secret` struct is never logged whole.
+| `msg`                          | Level | When                                                                                                                            |
+| ------------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `proxied`                      | INFO  | Forward request fully relayed.                                                                                                  |
+| `proxied_truncated`            | WARN  | Forward request: response headers flushed but body copy errored mid-stream. Status was already sent — the client got a partial. |
+| `passthrough`                  | INFO  | `--allow-passthrough` mode, no seal, fully relayed.                                                                             |
+| `passthrough_truncated`        | WARN  | Same shape as `proxied_truncated` for the passthrough path.                                                                     |
+| `proxy_reject`                 | WARN  | Pre-forward refusal (bad header, validator failure, ingress allowlist, bearer mismatch, …). Carries `reason`.                   |
+| `seal_opened_via_previous_key` | WARN  | Seal decrypted with `--previous-private-key`, not the current key. Wire to a metric — its rate is the rotation-progress signal. |
+| `egress_refused_at_dial`       | WARN  | `guardedDial` refused the upstream IP (self-loop or private/loopback/link-local). Logged separately from `upstream_error`.      |
+| `upstream_error`               | WARN  | Genuine upstream failure (dial timeout, TLS handshake failure, etc.). Distinct bucket from the egress-refusal signal above.     |
 
-Logger: stdlib `log/slog`. Prometheus metrics and OpenTelemetry tracing are deferred (see §5.2).
+Per-request fields: `method`, `host`, `path`, `query_keys` (keys only), `status`, `dur_ms`, `auth`, `processor`, `seal_euid`, `seal_name`, plus `reason` / `error` on rejects. `seal_euid` is the per-seal UUIDv4 stamped at seal time; `seal_name` is the operator-supplied label (empty if `--name` was not used).
+
+**Redaction.** Tokens, digests, the sealed blob, and the proxy's private key never appear in log lines. The mechanism is `Secret.LogValue` plus the convention that the unmarshaled `Secret` is never logged whole — only the four fields enumerated above flow into per-request log lines. The `secret-proxy unseal` debug subcommand legitimately prints cleartext to stdout and is the only path that surfaces sealed contents.
+
+Prometheus metrics and OpenTelemetry tracing are deferred (see §5.2).
 
 ### 4.4 Deployment
 
@@ -263,6 +279,7 @@ Items not built in v1. Rationale recorded where a future contributor might reope
 
 - **Additive features without rationale:** rate limiting; request body size cap; OAuth/HMAC/body/SigV4/macaroon processors; multi-processor chains; response-side credential extraction; web UI / control plane.
 - **Ingress IP CIDR allowlist** — _promoted in v1.x_, see `SECRET_PROXY_ALLOWED_CLIENT_CIDRS` in §4.1. Rationale: a public PaaS deployment exposes `/v1/forward` to the internet, and the seal+bearer pair is the only ingress check. Operators who run the proxy from a known set of client-app egress IPs (NAT pool, VPC NAT gateway, fixed-egress add-on) can shrink the attack surface to those IPs without changing the wire protocol. Defaults to off (empty list) so existing deployments are unaffected.
+- **Cloudflare-aware ingress identity** — _promoted in v1.x_, see `SECRET_PROXY_TRUST_CLOUDFLARE_HEADERS` in §4.1 and footgun #9. Same shape as the CIDR allowlist promotion: a CDN-fronted deployment couldn't use the rightmost-XFF rule because the rightmost hop is a Cloudflare egress IP, not the real client. The flag switches the ingress identity source to `CF-Connecting-IP` and strips the CF trust headers from upstream forwarding. Off by default; requires `--trust-tls-terminator`.
 - **Absolute-form HTTP forward-proxy protocol** (§3.1) — considered during prototyping for transparent `HTTP_PROXY` env-var integration with vendor SDKs. Dropped because reverse-proxy CDNs (Cloudflare, the layer in front of every PaaS Web Service) reject absolute-form HTTP at the edge, making PaaS deployments impossible. The relative-URL `/v1/forward` envelope traverses any CDN.
 - **`CONNECT` MITM mode** (§3.1) — adds on-the-fly cert minting + CA distribution; revisit when a vendor SDK refuses to be wrapped via `pkg/client`.
 - **`inject_basic_auth` processor** (§2.4) — pre-encoding `user:pass` at seal time keeps the processor surface single-purpose.

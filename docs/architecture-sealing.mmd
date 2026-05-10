@@ -4,19 +4,20 @@ flowchart LR
     subgraph Op["Operator (offline, once per credential)"]
         direction TB
         GenKey["secret-proxy gen-keypair"]
-        Seal["secret-proxy seal<br/>--token sk_live_***<br/>--auth-bearer ***<br/>--allow-host api.stripe.com<br/>--allow-method POST"]
+        Seal["secret-proxy seal<br/>--token sk_live_***<br/>--auth-bearer ***<br/>--name stripe-prod-charges<br/>--allow-host api.stripe.com<br/>--allow-method POST"]
     end
 
     GenKey -->|"private.hex<br/>(0600 file)"| Server[("secret-proxy<br/>process")]
     Server --> PubEP[/"GET /public-key"/]
     PubEP -->|"SECRET_PROXY_PUBLIC_KEY"| Seal
 
-    Seal -->|"SEALED_SECRET<br/>(base64 NaCl box)"| AppCfg[("App config / env:<br/>SEALED_SECRET<br/>AUTH_TOKEN")]
-    AppCfg -.->|"sent on every request<br/>via X-Sealed-Secret"| Runtime((("runtime path<br/>see other diagram")))
+    Seal -->|"stderr:<br/>euid (UUIDv4)<br/>name"| OpRecord[("operator records<br/>EUID for log<br/>correlation")]
+    Seal -->|"stdout: SEALED_SECRET<br/>(base64 NaCl box)"| AppCfg[("App config / env:<br/>SEALED_SECRET<br/>AUTH_TOKEN")]
+    AppCfg -.->|"sent on every request<br/>via X-Sealed-Secret;<br/>EUID + name surface in logs"| Runtime((("runtime path<br/>see other diagram")))
 
     classDef store fill:#fef3c7,stroke:#92400e,color:#78350f
     classDef proc fill:#e0e7ff,stroke:#3730a3,color:#1e1b4b
     classDef ref fill:#f1f5f9,stroke:#475569,color:#334155,stroke-dasharray:3 3
-    class Server,AppCfg store
+    class Server,AppCfg,OpRecord store
     class GenKey,Seal proc
     class Runtime ref

@@ -149,7 +149,11 @@ func runServe(args []string) error {
 			MinVersion: tls.VersionTLS13,
 			NextProtos: []string{"http/1.1"},
 		}
-		// HTTP/2 has no absolute-form requests, so the forward-proxy hop must speak HTTP/1.1.
+		// HTTP/1.1 only on the listener. Under HTTP/2 the stdlib's
+		// httputil.ReverseProxy panics with http.ErrAbortHandler on body-copy
+		// failure and net/http's server.go silently recovers it, hiding the
+		// truncation from per-request logs (see spec §3.2 / §4.3
+		// proxied_truncated). HTTP/1.1 keeps that signal observable.
 		server.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
 	}
 

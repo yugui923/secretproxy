@@ -27,8 +27,12 @@ Requires Go 1.25+. For Render or another PaaS, see the [Render](#render) section
 ```bash
 go install github.com/yugui923/secretproxy/cmd/secret-proxy@latest
 
+# Pick a directory the running user owns (use /etc/secret-proxy with sudo for
+# a real install; ~/.secret-proxy for local dev so the snippet runs as-is).
+DIR=~/.secret-proxy
+mkdir -p "$DIR" && cd "$DIR"
+
 # 1. Curve25519 keypair. Persist private to a 0600 file.
-mkdir -p /etc/secret-proxy && cd /etc/secret-proxy
 secret-proxy gen-keypair > keys.txt
 awk '/^private:/{print $2}' keys.txt > private.hex && chmod 0600 private.hex
 echo "publish to clients: $(awk '/^public:/{print $2}' keys.txt)"
@@ -37,9 +41,9 @@ echo "publish to clients: $(awk '/^public:/{print $2}' keys.txt)"
 secret-proxy gen-tls-cert --out-dir .
 
 # 3. Run.
-SECRET_PROXY_PRIVATE_KEY_FILE=/etc/secret-proxy/private.hex \
-SECRET_PROXY_TLS_CERT_FILE=/etc/secret-proxy/cert.pem \
-SECRET_PROXY_TLS_KEY_FILE=/etc/secret-proxy/key.pem \
+SECRET_PROXY_PRIVATE_KEY_FILE="$DIR/private.hex" \
+SECRET_PROXY_TLS_CERT_FILE="$DIR/cert.pem" \
+SECRET_PROXY_TLS_KEY_FILE="$DIR/key.pem" \
 secret-proxy serve
 ```
 
@@ -62,7 +66,7 @@ docker run --rm -p 8443:8443 \
 A ready-to-use Render Blueprint lives at [`render.yaml`](render.yaml). In Render: **New → Blueprint**, connect this repo, then set these as Secret values in the dashboard before the first deploy:
 
 - `SECRET_PROXY_PRIVATE_KEY` — output of `secret-proxy gen-keypair` (private hex).
-- `SECRET_PROXY_SELF_HOSTNAMES` — every hostname the proxy is publicly reachable under (Render-issued subdomain plus any custom domains, comma-separated). The loop guard refuses to dial these.
+- `SECRET_PROXY_SELF_HOSTNAMES` — every hostname the proxy is publicly reachable under (Render-issued subdomain plus any custom domains, comma-separated). The loop guard refuses to dial these. `localhost`, `127.0.0.1`, `::1`, and the container's own `os.Hostname()` are added automatically; this env var is for the public-facing names the platform exposes.
 - `SECRET_PROXY_ALLOWED_CLIENT_CIDRS` _(optional)_ — comma-separated CIDR / bare-IP ingress allowlist on `/v1/forward`. Behind Render's TLS edge the rightmost `X-Forwarded-For` hop is what's matched, so list your client apps' public egress IPs. Empty/unset = off. Health and `/public-key` probes are always allowed. Spec [§5.1 footgun #9](docs/specs/2026-05-08-secret-proxy.md#51-footguns).
 - `SECRET_PROXY_TRUST_CLOUDFLARE_HEADERS` _(optional, CDN-fronted only)_ — set to `1` when Cloudflare sits in front of Render. Switches the allowlist to read `CF-Connecting-IP` (which Cloudflare always sets at its edge) and strips the `CF-*` / `True-Client-IP` set from upstream forwarding. Without this, the allowlist matches Cloudflare's egress IP instead of the real client. Requires `SECRET_PROXY_TRUST_TLS_TERMINATOR=1`. The deployment must keep the Render origin unreachable except via Cloudflare — see spec [§5.1 footgun #9](docs/specs/2026-05-08-secret-proxy.md#51-footguns).
 
