@@ -352,6 +352,51 @@ func TestGuardedDial_blocksSelf(t *testing.T) {
 	}
 }
 
+// TestGuardedDial_blocksSelfCaseInsensitive locks the FIND-002 fix: an
+// uppercase variant of the proxy's own hostname must still trigger the
+// self-loop refusal. Without case folding, the map lookup misses, the
+// IP-based check resolves a public IP, and the dial proceeds.
+func TestGuardedDial_blocksSelfCaseInsensitive(t *testing.T) {
+	cases := []string{
+		"MY.HOST.EXAMPLE.COM",
+		"My.Host.Example.Com",
+		"my.HOST.example.com",
+	}
+	for _, host := range cases {
+		t.Run(host, func(t *testing.T) {
+			s := &Server{SelfHostnames: AutoSelfHostnames([]string{"my.host.example.com"})}
+			s.init()
+			_, err := s.guardedDial(context.Background(), "tcp", host+":443")
+			if err == nil {
+				t.Fatalf("expected self-loop refusal for %q", host)
+			}
+			if !errors.Is(err, ErrEgressRefused) {
+				t.Fatalf("self-loop error must wrap ErrEgressRefused, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "self-loop") {
+				t.Fatalf("self-loop error message should name the reason, got %v", err)
+			}
+		})
+	}
+}
+
+// TestAutoSelfHostnames_lowercases asserts the operator-supplied entries
+// (and os.Hostname) are normalized to lowercase before being stored. The
+// guardedDial lookup also lowercases — both sides must agree.
+func TestAutoSelfHostnames_lowercases(t *testing.T) {
+	got := AutoSelfHostnames([]string{"PROXY.Example.COM", "Other.Host"})
+	for _, want := range []string{"proxy.example.com", "other.host", "localhost", "127.0.0.1", "::1"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("AutoSelfHostnames missing key %q; got %v", want, got)
+		}
+	}
+	for k := range got {
+		if k != strings.ToLower(k) {
+			t.Errorf("AutoSelfHostnames key %q is not lowercase", k)
+		}
+	}
+}
+
 func TestStripPort(t *testing.T) {
 	cases := map[string]string{
 		"api.stripe.com":     "api.stripe.com",

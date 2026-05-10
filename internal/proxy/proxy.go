@@ -630,7 +630,12 @@ func (s *Server) guardedDial(ctx context.Context, network, addr string) (net.Con
 	if err != nil {
 		return nil, err
 	}
-	if _, isSelf := s.SelfHostnames[host]; isSelf {
+	// Lowercase before lookup: DNS hostnames are case-insensitive, but a Go
+	// map lookup is not. Without normalizing, an attacker who tweaks the case
+	// of the proxy's own hostname (SECRET-PROXY.EXAMPLE.COM) bypasses the
+	// self-loop guard, the IP-based check then resolves a public IP, and the
+	// dial proceeds. The map is built lowercase in AutoSelfHostnames.
+	if _, isSelf := s.SelfHostnames[strings.ToLower(host)]; isSelf {
 		s.Logger.Warn("egress_refused", "reason", "self_loop", "host", host)
 		return nil, fmt.Errorf("%w: self-loop (%s)", ErrEgressRefused, host)
 	}
@@ -691,16 +696,20 @@ func contains(haystack []string, needle string) bool {
 }
 
 func AutoSelfHostnames(extra []string) map[string]struct{} {
+	// Keys are stored lowercase so guardedDial's lookup (also lowercased) is
+	// case-insensitive — DNS hostnames are case-insensitive but Go's map
+	// keys are not. Without this, SECRET-PROXY.EXAMPLE.COM bypasses the
+	// self-loop check.
 	out := map[string]struct{}{
 		"localhost": {},
 		"127.0.0.1": {},
 		"::1":       {},
 	}
 	if h, err := osHostname(); err == nil && h != "" {
-		out[h] = struct{}{}
+		out[strings.ToLower(h)] = struct{}{}
 	}
 	for _, e := range extra {
-		e = strings.TrimSpace(e)
+		e = strings.ToLower(strings.TrimSpace(e))
 		if e != "" {
 			out[e] = struct{}{}
 		}
