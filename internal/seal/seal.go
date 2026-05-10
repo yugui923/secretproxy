@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp/syntax"
 	"strings"
 
 	"golang.org/x/crypto/curve25519"
@@ -168,8 +169,14 @@ func (s *Secret) Validate() error {
 	if s.AllowedHostPattern == "" && len(s.AllowedHosts) == 0 {
 		return errors.New("seal: host allowlist is required")
 	}
+	if err := requireAnchoredPattern("allowed_host_pattern", s.AllowedHostPattern); err != nil {
+		return err
+	}
 	if s.AllowedPathPattern != "" && len(s.AllowedPathPrefixes) > 0 {
 		return errors.New("seal: allowed_path_prefixes and allowed_path_pattern are mutually exclusive")
+	}
+	if err := requireAnchoredPattern("allowed_path_pattern", s.AllowedPathPattern); err != nil {
+		return err
 	}
 	if s.BearerAuth != nil && s.BearerAuth.Digest == "" {
 		return errors.New("seal: bearer_auth.digest required")
@@ -207,6 +214,68 @@ func (s *Secret) Validate() error {
 		}
 	}
 	return nil
+}
+
+// requireAnchoredPattern rejects regex patterns that aren't anchored at
+// both ends. An unanchored pattern like "stripe\\.com" matches any host
+// containing the substring (e.g. "evil.example.com.stripe.com" or
+// "stripe.com.attacker.io"), silently widening the allowlist far beyond
+// the operator's intent.
+//
+// Implemented by parsing the pattern into an AST and inspecting the
+// outermost concatenation: the first sub-expression must be a begin
+// anchor (\A / ^) and the last must be an end anchor (\z / $). A
+// surface-level string check (HasPrefix "^", HasSuffix "$") trips on
+// patterns like ^foo\$ (escaped literal $, not an anchor) and ^foo[$]
+// (char class containing $). Parsing dodges both.
+//
+// Empty patterns are accepted (the optional-field case); the caller
+// gates required-vs-optional separately.
+func requireAnchoredPattern(label, pat string) error {
+	if pat == "" {
+		return nil
+	}
+	re, err := syntax.Parse(pat, syntax.Perl)
+	if err != nil {
+		return fmt.Errorf("seal: %s: invalid regex: %w", label, err)
+	}
+	if !beginsWithAnchor(re) {
+		return fmt.Errorf("seal: %s must start with %q or %q (anchored regex required)", label, "^", `\A`)
+	}
+	if !endsWithAnchor(re) {
+		return fmt.Errorf("seal: %s must end with %q or %q (anchored regex required)", label, "$", `\z`)
+	}
+	return nil
+}
+
+func beginsWithAnchor(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpBeginText, syntax.OpBeginLine:
+		return true
+	case syntax.OpConcat:
+		if len(re.Sub) == 0 {
+			return false
+		}
+		return beginsWithAnchor(re.Sub[0])
+	case syntax.OpCapture:
+		return beginsWithAnchor(re.Sub[0])
+	}
+	return false
+}
+
+func endsWithAnchor(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpEndText, syntax.OpEndLine:
+		return true
+	case syntax.OpConcat:
+		if len(re.Sub) == 0 {
+			return false
+		}
+		return endsWithAnchor(re.Sub[len(re.Sub)-1])
+	case syntax.OpCapture:
+		return endsWithAnchor(re.Sub[0])
+	}
+	return false
 }
 
 // refuseHeaderControlChars rejects values that Go's net/http header

@@ -127,6 +127,98 @@ func TestValidate_bothPathFields(t *testing.T) {
 	}
 }
 
+// TestValidate_refusesUnanchoredPatterns locks the FIND-009 fix: an
+// allowed_host_pattern or allowed_path_pattern that lacks ^ at the start
+// or $ at the end is refused at seal time, because RE2's MatchString
+// behavior on an unanchored pattern admits any host/path containing the
+// substring (e.g. ^stripe\.com$ matches "evil.example.com.stripe.com").
+func TestValidate_refusesUnanchoredPatterns(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(*Secret)
+	}{
+		{"host_no_caret", func(s *Secret) {
+			s.AllowedHosts = nil
+			s.AllowedHostPattern = "api\\.stripe\\.com$"
+		}},
+		{"host_no_dollar", func(s *Secret) {
+			s.AllowedHosts = nil
+			s.AllowedHostPattern = "^api\\.stripe\\.com"
+		}},
+		{"host_neither_anchor", func(s *Secret) {
+			s.AllowedHosts = nil
+			s.AllowedHostPattern = "stripe\\.com"
+		}},
+		{"path_no_caret", func(s *Secret) { s.AllowedPathPattern = "/v1/charges/.*$" }},
+		{"path_no_dollar", func(s *Secret) { s.AllowedPathPattern = "^/v1/charges/.*" }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := validSecret()
+			c.set(s)
+			if err := s.Validate(); err == nil {
+				t.Fatal("expected anchored-pattern refusal")
+			}
+		})
+	}
+}
+
+// TestValidate_acceptsAnchoredPatternWithFlagGroup confirms a leading
+// (?i) inline flag group does not confuse the anchor check. RE2 docs
+// give patterns starting with such a group, and operators copy them
+// verbatim; refusing those would push them toward the unsafe alternative.
+func TestValidate_acceptsAnchoredPatternWithFlagGroup(t *testing.T) {
+	// Note: RE2 (Go's regexp) supports flags i, m, s, U; x (extended) is
+	// unsupported. The mixed-flag tests use only RE2-valid combinations.
+	for _, pat := range []string{
+		"(?i)^api\\.stripe\\.com$",
+		"(?is)^api\\.stripe\\.com$",
+		"(?ismU)^api\\.stripe\\.com$",
+		"(?-i)^api\\.stripe\\.com$",
+		`\A^api\.stripe\.com$\z`,
+	} {
+		s := validSecret()
+		s.AllowedHosts = nil
+		s.AllowedHostPattern = pat
+		if err := s.Validate(); err != nil {
+			t.Errorf("anchored pattern %q rejected: %v", pat, err)
+		}
+	}
+}
+
+// TestValidate_refusesEscapedDollarOrCharClassDollar — the AST-based
+// check must NOT be tricked by patterns that look anchored at the string
+// level but aren't semantically anchored: an escaped \$ is a literal
+// dollar, not the end-of-line anchor; [$] is a character class. Both
+// would let an attacker append to the matched substring.
+func TestValidate_refusesEscapedDollarOrCharClassDollar(t *testing.T) {
+	for _, pat := range []string{
+		`^api\.stripe\.com\$`,
+		`^api\.stripe\.com[$]`,
+		`^api\.stripe\.com$\.attacker\.com`, // anchor in middle of pattern
+	} {
+		s := validSecret()
+		s.AllowedHosts = nil
+		s.AllowedHostPattern = pat
+		if err := s.Validate(); err == nil {
+			t.Errorf("non-anchored pattern %q must be refused", pat)
+		}
+	}
+}
+
+// TestValidate_acceptsCapturedAnchoredPattern locks the AST recursion:
+// a top-level capture group whose body is anchored at both ends counts
+// as anchored. Operators sometimes write (^api\.stripe\.com$) for legacy
+// portability; the AST walker descends through OpCapture.
+func TestValidate_acceptsCapturedAnchoredPattern(t *testing.T) {
+	s := validSecret()
+	s.AllowedHosts = nil
+	s.AllowedHostPattern = `(^api\.stripe\.com$)`
+	if err := s.Validate(); err != nil {
+		t.Fatalf("captured anchored pattern rejected: %v", err)
+	}
+}
+
 func TestValidate_emptyToken(t *testing.T) {
 	s := validSecret()
 	s.InjectHeader.Token = ""

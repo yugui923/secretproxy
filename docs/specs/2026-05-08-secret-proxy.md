@@ -102,12 +102,12 @@ Override only `format` and `header_name`, only within `allowed_formats` / `allow
 **Host** (mandatory; CLI rejects sealing without one):
 
 - `allowed_hosts` — case-insensitive exact match against `request.Host` (port-aware). DNS hostnames are case-insensitive, so the proxy lowercases both sides before comparing.
-- `allowed_host_pattern` — RE2 regex; the proxy prepends `(?i)` so the match is case-insensitive regardless of how the operator wrote the pattern. Anchor with `^...$`.
+- `allowed_host_pattern` — RE2 regex; the proxy prepends `(?i)` so the match is case-insensitive regardless of how the operator wrote the pattern. Must be anchored with `^...$`; the seal CLI refuses unanchored patterns at seal time (an unanchored regex matches any substring, e.g. `stripe\.com` admits `evil.example.com.stripe.com`).
 
 **Path** (optional, at most one):
 
 - `allowed_path_prefixes` — segment-aware prefix match: `/v1/charges` matches `/v1/charges` and `/v1/charges/abc`, not `/v1/charges-list`.
-- `allowed_path_pattern` — RE2 regex.
+- `allowed_path_pattern` — RE2 regex. Must be anchored with `^...$`; the seal CLI refuses unanchored patterns at seal time.
 
 Independent of either allowlist, any decoded path containing a `.` or `..`
 segment is refused before the allowlist runs. `url.Parse` decodes `%2e%2e` to
