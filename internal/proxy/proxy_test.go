@@ -41,8 +41,26 @@ func TestParseSealedHeader_withOverride(t *testing.T) {
 	if blob != "abc==" {
 		t.Fatalf("blob mismatch: %q", blob)
 	}
-	if v, ok := override["format"].(string); !ok || v != "%s" {
-		t.Fatalf("override format wrong: %v", override)
+	if override == nil || override.Format != "%s" {
+		t.Fatalf("override format wrong: %+v", override)
+	}
+}
+
+// TestParseSealedHeader_unknownFieldRefused locks the post-review fix:
+// the override JSON parser uses DisallowUnknownFields against a typed
+// struct (not map[string]any, where the flag is silently a no-op), so
+// an unknown override key like {"token":"..."} or {"foo":"bar"} fails
+// at parse time rather than only being caught by resolveProcessor's
+// downstream switch.
+func TestParseSealedHeader_unknownFieldRefused(t *testing.T) {
+	for _, raw := range []string{
+		`abc== ; {"token":"sk"}`,
+		`abc== ; {"foo":"bar"}`,
+		`abc== ; {"format":"%s","token":"sk"}`,
+	} {
+		if _, _, err := parseSealedHeader(raw); err == nil {
+			t.Errorf("override with unknown field must be refused: %q", raw)
+		}
 	}
 }
 
@@ -91,7 +109,7 @@ func TestExtractBearer_unprefixed(t *testing.T) {
 
 func TestResolveProcessor_acceptedFormat(t *testing.T) {
 	ih := &seal.InjectHeader{Token: "tok", AllowedFormats: []string{"%s"}}
-	format, hn, err := resolveProcessor(ih, map[string]any{"format": "%s"})
+	format, hn, err := resolveProcessor(ih, &sealedHeaderOverride{Format: "%s"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,24 +123,22 @@ func TestResolveProcessor_acceptedFormat(t *testing.T) {
 
 func TestResolveProcessor_rejectedFormat(t *testing.T) {
 	ih := &seal.InjectHeader{Token: "tok", AllowedFormats: []string{"%s"}}
-	if _, _, err := resolveProcessor(ih, map[string]any{"format": "Bearer %s"}); err == nil {
+	if _, _, err := resolveProcessor(ih, &sealedHeaderOverride{Format: "Bearer %s"}); err == nil {
 		t.Fatal("expected reject for format outside allowed_formats")
 	}
 }
 
 func TestResolveProcessor_alreadySet(t *testing.T) {
 	ih := &seal.InjectHeader{Token: "tok", Format: "Bearer %s", AllowedFormats: []string{"X-%s"}}
-	if _, _, err := resolveProcessor(ih, map[string]any{"format": "X-%s"}); err == nil {
+	if _, _, err := resolveProcessor(ih, &sealedHeaderOverride{Format: "X-%s"}); err == nil {
 		t.Fatal("expected reject when seal already set format")
 	}
 }
 
-func TestResolveProcessor_unknownKey(t *testing.T) {
-	ih := &seal.InjectHeader{Token: "tok"}
-	if _, _, err := resolveProcessor(ih, map[string]any{"token": "x"}); err == nil {
-		t.Fatal("expected reject for non-overridable key")
-	}
-}
+// Unknown override keys ("token", "foo", etc.) are now refused at parse time
+// by parseSealedHeader's DisallowUnknownFields against the typed struct;
+// see TestParseSealedHeader_unknownFieldRefused. resolveProcessor itself
+// only sees the typed schema, so the "unknown key" branch is unreachable.
 
 func TestResolveProcessor_defaults(t *testing.T) {
 	ih := &seal.InjectHeader{Token: "tok"}
@@ -410,7 +426,7 @@ func TestValidateHost_rejectsDifferentHost(t *testing.T) {
 
 func TestResolveProcessor_acceptedHeaderName(t *testing.T) {
 	ih := &seal.InjectHeader{Token: "tok", AllowedHeaderNames: []string{"X-API-Key"}}
-	format, hn, err := resolveProcessor(ih, map[string]any{"header_name": "X-API-Key"})
+	format, hn, err := resolveProcessor(ih, &sealedHeaderOverride{HeaderName: "X-API-Key"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,22 +437,29 @@ func TestResolveProcessor_acceptedHeaderName(t *testing.T) {
 
 func TestResolveProcessor_rejectedHeaderName(t *testing.T) {
 	ih := &seal.InjectHeader{Token: "tok", AllowedHeaderNames: []string{"X-API-Key"}}
-	if _, _, err := resolveProcessor(ih, map[string]any{"header_name": "Authorization"}); err == nil {
+	if _, _, err := resolveProcessor(ih, &sealedHeaderOverride{HeaderName: "Authorization"}); err == nil {
 		t.Fatal("expected reject for header_name outside allowed_header_names")
 	}
 }
 
 func TestResolveProcessor_headerNameAlreadySet(t *testing.T) {
 	ih := &seal.InjectHeader{Token: "tok", HeaderName: "Authorization", AllowedHeaderNames: []string{"X-Custom"}}
-	if _, _, err := resolveProcessor(ih, map[string]any{"header_name": "X-Custom"}); err == nil {
+	if _, _, err := resolveProcessor(ih, &sealedHeaderOverride{HeaderName: "X-Custom"}); err == nil {
 		t.Fatal("expected reject when seal already pinned header_name")
 	}
 }
 
-func TestResolveProcessor_overrideValueTypeRejected(t *testing.T) {
-	ih := &seal.InjectHeader{Token: "tok", AllowedFormats: []string{"%s"}}
-	if _, _, err := resolveProcessor(ih, map[string]any{"format": 42}); err == nil {
-		t.Fatal("non-string override value must be rejected")
+// Override value-type mismatches (e.g. {"format": 42}) are now refused
+// by json.Decoder at parseSealedHeader against the typed struct, before
+// resolveProcessor sees the value. See TestParseSealedHeader_*.
+func TestParseSealedHeader_typeMismatchRefused(t *testing.T) {
+	for _, raw := range []string{
+		`abc== ; {"format": 42}`,
+		`abc== ; {"header_name": true}`,
+	} {
+		if _, _, err := parseSealedHeader(raw); err == nil {
+			t.Errorf("override with non-string value must be refused: %q", raw)
+		}
 	}
 }
 

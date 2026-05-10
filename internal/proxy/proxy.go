@@ -487,9 +487,20 @@ func (s *statusWriter) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
+// sealedHeaderOverride is the typed schema for the JSON override segment of
+// X-Sealed-Secret (the part after ";"). Decoding into a struct (rather than
+// map[string]any) lets json.DisallowUnknownFields actually do what its name
+// implies — on a map, the flag is silently a no-op. Tags mirror the
+// override keys documented in spec §2.5.
+type sealedHeaderOverride struct {
+	Format     string `json:"format,omitempty"`
+	HeaderName string `json:"header_name,omitempty"`
+}
+
 // parseSealedHeader splits an X-Sealed-Secret value of "<blob> ; <json>" into
-// the base64 blob and the optional JSON override map (§2.5).
-func parseSealedHeader(raw string) (blob string, override map[string]any, err error) {
+// the base64 blob and the optional JSON override (§2.5). Override keys
+// outside the typed schema are refused by json.DisallowUnknownFields.
+func parseSealedHeader(raw string) (blob string, override *sealedHeaderOverride, err error) {
 	if raw == "" {
 		return "", nil, errMissingSecret
 	}
@@ -499,10 +510,10 @@ func parseSealedHeader(raw string) (blob string, override map[string]any, err er
 		return "", nil, errMissingSecret
 	}
 	if len(parts) == 2 {
-		override = map[string]any{}
+		override = &sealedHeaderOverride{}
 		dec := json.NewDecoder(strings.NewReader(strings.TrimSpace(parts[1])))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&override); err != nil {
+		if err := dec.Decode(override); err != nil {
 			return "", nil, fmt.Errorf("override JSON: %w", err)
 		}
 	}
@@ -532,7 +543,7 @@ func extractBearer(h string) (string, bool) {
 	return "", false
 }
 
-func resolveProcessor(ih *seal.InjectHeader, override map[string]any) (format, headerName string, err error) {
+func resolveProcessor(ih *seal.InjectHeader, override *sealedHeaderOverride) (format, headerName string, err error) {
 	if ih == nil {
 		return "", "", errors.New("no processor in seal")
 	}
@@ -544,31 +555,26 @@ func resolveProcessor(ih *seal.InjectHeader, override map[string]any) (format, h
 	if headerName == "" {
 		headerName = "Authorization"
 	}
-	for k, v := range override {
-		s, ok := v.(string)
-		if !ok {
-			return "", "", fmt.Errorf("override %q: must be string", k)
+	if override == nil {
+		return format, headerName, nil
+	}
+	if override.Format != "" {
+		if ih.Format != "" {
+			return "", "", errors.New("override forbidden: format already set in seal")
 		}
-		switch k {
-		case "format":
-			if ih.Format != "" {
-				return "", "", errors.New("override forbidden: format already set in seal")
-			}
-			if !contains(ih.AllowedFormats, s) {
-				return "", "", fmt.Errorf("override format %q not in allowed_formats", s)
-			}
-			format = s
-		case "header_name":
-			if ih.HeaderName != "" {
-				return "", "", errors.New("override forbidden: header_name already set in seal")
-			}
-			if !contains(ih.AllowedHeaderNames, s) {
-				return "", "", fmt.Errorf("override header_name %q not in allowed_header_names", s)
-			}
-			headerName = s
-		default:
-			return "", "", fmt.Errorf("override key %q not allowed", k)
+		if !contains(ih.AllowedFormats, override.Format) {
+			return "", "", fmt.Errorf("override format %q not in allowed_formats", override.Format)
 		}
+		format = override.Format
+	}
+	if override.HeaderName != "" {
+		if ih.HeaderName != "" {
+			return "", "", errors.New("override forbidden: header_name already set in seal")
+		}
+		if !contains(ih.AllowedHeaderNames, override.HeaderName) {
+			return "", "", fmt.Errorf("override header_name %q not in allowed_header_names", override.HeaderName)
+		}
+		headerName = override.HeaderName
 	}
 	return format, headerName, nil
 }
