@@ -255,9 +255,8 @@ func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sw := newStatusWriter(w)
-	s.forwardTo(sw, r, upstream, secret.InjectHeader, format, headerName)
-	s.Logger.Info("proxied",
-		append(logFields, "status", sw.status, "dur_ms", time.Since(start).Milliseconds())...)
+	copyErr := s.forwardTo(sw, r, upstream, secret.InjectHeader, format, headerName)
+	s.logForwardOutcome("proxied", copyErr, sw.status, start, logFields)
 }
 
 func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, upstream *url.URL, start time.Time, logFields []any) {
@@ -266,18 +265,31 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, upstream *u
 		return
 	}
 	sw := newStatusWriter(w)
-	s.forwardTo(sw, r, upstream, nil, "", "")
-	s.Logger.Info("passthrough",
-		append(logFields, "status", sw.status, "dur_ms", time.Since(start).Milliseconds())...)
+	copyErr := s.forwardTo(sw, r, upstream, nil, "", "")
+	s.logForwardOutcome("passthrough", copyErr, sw.status, start, logFields)
 }
 
-func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url.URL, ih *seal.InjectHeader, format, headerName string) {
+// logForwardOutcome emits the per-request log line. If the body copy errored
+// after headers were already flushed (sw.status != 0 and copyErr != nil), log
+// "proxied_truncated" / "passthrough_truncated" at WARN — the operator-facing
+// signal that the response the client received was incomplete. Otherwise log
+// the normal success line at INFO.
+func (s *Server) logForwardOutcome(event string, copyErr error, status int, start time.Time, fields []any) {
+	tail := append(fields, "status", status, "dur_ms", time.Since(start).Milliseconds())
+	if copyErr != nil {
+		s.Logger.Warn(event+"_truncated", append(tail, "error", copyErr.Error())...)
+		return
+	}
+	s.Logger.Info(event, tail...)
+}
+
+func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url.URL, ih *seal.InjectHeader, format, headerName string) (copyErr error) {
 	target := *upstream
 	target.Scheme = "https"
 	target.Host = stripPort(upstream.Host)
 	if target.Host == "" {
 		http.Error(w, "missing target host", http.StatusBadRequest)
-		return
+		return nil
 	}
 
 	director := func(req *http.Request) {
@@ -300,9 +312,21 @@ func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url
 		}
 	}
 
+	// Wrap the upstream response body in ModifyResponse so a read error
+	// during the body-copy phase (upstream connection drops mid-stream after
+	// the proxy already flushed headers to the client) is captured here
+	// rather than disappearing into httputil's recovered-panic path. Without
+	// this, a truncated response logs as success because the status code
+	// statusWriter recorded was already written. ErrorHandler still owns
+	// the dial-time / pre-body failures.
+	bodyTrack := &bodyReadTracker{}
 	rp := &httputil.ReverseProxy{
 		Director:  director,
 		Transport: s.Transport,
+		ModifyResponse: func(resp *http.Response) error {
+			bodyTrack.wrap(resp)
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			if errors.Is(err, ErrEgressRefused) {
 				// Policy refusal — separate signal from upstream availability
@@ -316,8 +340,54 @@ func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url
 			http.Error(w, "upstream error", http.StatusBadGateway)
 		},
 	}
+	// httputil.ReverseProxy panics with http.ErrAbortHandler when the body
+	// copy fails after the response status has been written (net/http's
+	// server.go recovers ErrAbortHandler silently). Without recovering it
+	// here, the panic propagates past handleForward's logForwardOutcome
+	// call, so the truncation never makes it into the per-request log line.
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		if r != http.ErrAbortHandler {
+			panic(r)
+		}
+		if e := bodyTrack.err(); e != nil {
+			copyErr = e
+			return
+		}
+		copyErr = errors.New("response body copy aborted (httputil ErrAbortHandler)")
+	}()
 	rp.ServeHTTP(w, r)
+	return bodyTrack.err()
 }
+
+// bodyReadTracker wraps an upstream response body so a non-EOF read error
+// during the body-copy phase is captured for the per-request log line. The
+// wrapper is single-goroutine — httputil.ReverseProxy's copyBuffer reads
+// sequentially within ServeHTTP — so no synchronization is needed.
+type bodyReadTracker struct {
+	body    io.ReadCloser
+	readErr error
+}
+
+func (b *bodyReadTracker) wrap(resp *http.Response) {
+	b.body = resp.Body
+	resp.Body = b
+}
+
+func (b *bodyReadTracker) Read(p []byte) (int, error) {
+	n, err := b.body.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		b.readErr = err
+	}
+	return n, err
+}
+
+func (b *bodyReadTracker) Close() error { return b.body.Close() }
+
+func (b *bodyReadTracker) err() error { return b.readErr }
 
 func (s *Server) respondError(w http.ResponseWriter, r *http.Request, code int, msg string, cause error, start time.Time, fields []any) {
 	if cause != nil {

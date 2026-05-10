@@ -71,7 +71,14 @@ func startProxy(t *testing.T, srv *Server) (proxyURL string, stop func()) {
 		Handler: srv.Handler(),
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS13,
+			NextProtos: []string{"http/1.1"},
 		},
+		// Mirror production (cmd/secret-proxy/main.go): disable HTTP/2 on
+		// the listener. httputil.ReverseProxy panics with ErrAbortHandler
+		// on body-copy errors under HTTP/2 (and that panic is silently
+		// recovered by net/http), so the ErrorLog hook the proxy relies on
+		// only fires under HTTP/1.1.
+		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 	}
 	done := make(chan error, 1)
 	go func() { done <- httpSrv.ServeTLS(listener, cert, key) }()
@@ -743,6 +750,74 @@ func TestIntegration_LogRedactsSecretsIncludesEUID(t *testing.T) {
 	}
 	if !strings.Contains(logs, credName) {
 		t.Errorf("log missing seal_name %q\nlogs:\n%s", credName, logs)
+	}
+}
+
+// TestIntegration_BodyTruncationLoggedAsTruncated locks down the rule that a
+// mid-stream upstream failure (response headers flushed, body cut short) is
+// logged as proxied_truncated at WARN, not as a normal proxied success at
+// INFO. Without this, an operator wiring alerts off the proxied success line
+// would never see truncated responses.
+//
+// Strategy: an upstream that advertises a Content-Length larger than the body
+// it actually writes, then closes the connection. ReverseProxy's body copy
+// surfaces the read error via ErrorLog, the new copyErrSink captures it, and
+// logForwardOutcome routes to the truncated branch.
+func TestIntegration_BodyTruncationLoggedAsTruncated(t *testing.T) {
+	// HTTP/1.1 only on the upstream — Hijack is not supported under HTTP/2,
+	// and hijacking is the simplest way to cut the connection mid-body.
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial body"))
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("response writer not a Hijacker (upstream must be HTTP/1.1)")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.Close()
+	}))
+	upstream.TLS = &tls.Config{NextProtos: []string{"http/1.1"}}
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	var logBuf bytes.Buffer
+	pub, priv, _ := seal.GenerateKeypair()
+	srv := &Server{
+		PrivateKey:         &priv,
+		Transport:          hijackingTransport(upstream.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true}),
+		DisableEgressGuard: true,
+		SelfHostnames:      map[string]struct{}{},
+		Logger:             slog.New(slog.NewJSONHandler(&logBuf, nil)),
+	}
+	pURL, stop := startProxy(t, srv)
+	defer stop()
+
+	blob := sealStripeLike(t, pub)
+	rt, _ := client.NewTransport(pURL,
+		client.WithSealedSecret(blob),
+		client.WithAuth("client-token"),
+		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
+	)
+	req, _ := http.NewRequest(http.MethodPost, "https://api.example.com/v1/charges", nil)
+	resp, err := (&http.Client{Transport: rt, Timeout: 5 * time.Second}).Do(req)
+	if err == nil {
+		_, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+
+	logs := logBuf.String()
+	if !strings.Contains(logs, `"msg":"proxied_truncated"`) {
+		t.Errorf("expected proxied_truncated WARN log line, got:\n%s", logs)
+	}
+	if !strings.Contains(logs, `"level":"WARN"`) {
+		t.Errorf("truncation must log at WARN, not INFO; got:\n%s", logs)
+	}
+	if strings.Contains(logs, `"msg":"proxied"`) {
+		t.Errorf("truncated response must NOT also log as success-shaped 'proxied'; got:\n%s", logs)
 	}
 }
 
