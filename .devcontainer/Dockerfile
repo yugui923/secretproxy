@@ -62,8 +62,17 @@ USER vscode
 RUN sudo chsh -s $(which zsh) vscode
 
 
-# Install mise (runtime version manager)
-RUN curl https://mise.run | sh
+# Install mise (runtime version manager).
+#
+# Pin the installer's MISE_VERSION env var so an upstream re-publish or
+# repo compromise of the install script cannot silently bump us onto a
+# different release. Bump the literal below alongside the
+# "Last updated" date at the top of this Dockerfile after a clean test
+# build. Resolved 2026-05-10. Post-install assertion fails the layer
+# loudly if the resolved binary doesn't match the requested pin.
+ENV MISE_VERSION=v2026.5.4
+RUN curl https://mise.run | sh \
+    && ~/.local/bin/mise --version | grep -F "${MISE_VERSION#v}"
 ENV PATH="/home/vscode/.local/bin:${PATH}"
 
 # Configure mise to auto-activate
@@ -72,8 +81,10 @@ RUN echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc && \
 
 
 # Install uv (fast Python package manager).
-# uv 0.5.0+ installs to ~/.local/bin (already on PATH from the mise step).
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+# Pin via the version-prefixed install URL so upstream changes to the
+# default install script don't slip through. uv 0.5.0+ installs to
+# ~/.local/bin (already on PATH from the mise step). Resolved 2026-05-10.
+RUN curl -LsSf https://astral.sh/uv/0.11.12/install.sh | sh
 
 
 # Pre-install Python and Node via mise and make them the global default.
@@ -82,8 +93,13 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN mise use --global python@3.13 node@22
 
 
-# Install Claude Code using native installation (recommended method)
-# The native install provides auto-updates and doesn't require Node.js
+# Install Claude Code using native installation (recommended method).
+# The native install provides auto-updates and doesn't require Node.js.
+#
+# Note: claude.ai/install.sh is Anthropic's official install path; it is
+# unversioned by design (auto-update is the contract). For higher trust
+# environments, fetch a versioned binary from
+# https://github.com/anthropics/claude-code/releases instead.
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
 
@@ -106,8 +122,10 @@ RUN uv tool install ruff && \
 # Cloning into ~/.oh-my-zsh/custom/plugins/ is necessary but not
 # sufficient — Oh My Zsh only loads plugins listed in the
 # plugins=(...) array, which the base image initialises to (git).
-RUN git clone https://github.com/zsh-users/zsh-autosuggestions \
+# Plugins are pinned to released tags so HEAD drift can't slip a
+# compromised upstream into the dev shell.
+RUN git clone --branch v0.7.1 --depth 1 https://github.com/zsh-users/zsh-autosuggestions \
       ~/.oh-my-zsh/custom/plugins/zsh-autosuggestions \
- && git clone https://github.com/zsh-users/zsh-syntax-highlighting \
+ && git clone --branch 0.8.0 --depth 1 https://github.com/zsh-users/zsh-syntax-highlighting \
       ~/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting \
  && sed -i 's/^plugins=(git)$/plugins=(git zsh-autosuggestions zsh-syntax-highlighting)/' ~/.zshrc
