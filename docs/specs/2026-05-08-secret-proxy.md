@@ -101,8 +101,8 @@ Override only `format` and `header_name`, only within `allowed_formats` / `allow
 
 **Host** (mandatory; CLI rejects sealing without one):
 
-- `allowed_hosts` — case-sensitive exact match against `request.Host` (port-aware).
-- `allowed_host_pattern` — RE2 regex; anchor with `^...$`.
+- `allowed_hosts` — case-insensitive exact match against `request.Host` (port-aware). DNS hostnames are case-insensitive, so the proxy lowercases both sides before comparing.
+- `allowed_host_pattern` — RE2 regex; the proxy prepends `(?i)` so the match is case-insensitive regardless of how the operator wrote the pattern. Anchor with `^...$`.
 
 **Path** (optional, at most one):
 

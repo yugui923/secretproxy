@@ -552,16 +552,25 @@ func rejectNonStandardPort(host string) error {
 }
 
 func validateHost(host string, secret *seal.Secret) error {
+	// DNS hostnames are case-insensitive. For the allowlist, fold both
+	// sides. For the pattern, prepend the RE2 case-insensitive flag (?i)
+	// so operator-authored patterns work whether the operator typed them
+	// in lower- or mixed-case — without this, Lowercasing only the input
+	// creates a silent fail-closed footgun for any pattern that contains
+	// uppercase regex literals (^API\.Stripe\.com$) or shorthand classes
+	// like \D / \W / \S where Lowercasing the pattern itself would change
+	// the meaning. Idempotent if the operator already wrote (?i).
+	hostLower := strings.ToLower(host)
 	if len(secret.AllowedHosts) > 0 {
 		for _, h := range secret.AllowedHosts {
-			if h == host {
+			if strings.ToLower(h) == hostLower {
 				return nil
 			}
 		}
 		return fmt.Errorf("host %q not in allowed_hosts", host)
 	}
 	if secret.AllowedHostPattern != "" {
-		ok, err := regexp.MatchString(secret.AllowedHostPattern, host)
+		ok, err := regexp.MatchString("(?i)"+secret.AllowedHostPattern, host)
 		if err != nil {
 			return fmt.Errorf("allowed_host_pattern: %w", err)
 		}

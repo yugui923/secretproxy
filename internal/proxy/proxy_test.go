@@ -155,6 +155,33 @@ func TestValidateHost_pattern(t *testing.T) {
 	}
 }
 
+// TestValidateHost_caseInsensitive locks the FIND-003 fix: DNS hostnames are
+// case-insensitive, so the seal's allowlist (and pattern) must match
+// regardless of the case of either side. Without this, sealing
+// api.stripe.com and sending Api.Stripe.com fails closed and operators
+// reach for unanchored regex (FIND-009) to "fix" the surprise. The pattern
+// matcher prepends (?i) so operators can author the pattern in any case,
+// including with shorthand classes (\D, \W, \S) whose meaning would
+// change if the pattern itself were Lowercased.
+func TestValidateHost_caseInsensitive(t *testing.T) {
+	listSeal := &seal.Secret{AllowedHosts: []string{"API.Stripe.com"}}
+	patSeals := []*seal.Secret{
+		{AllowedHostPattern: "^api\\.stripe\\.com$"},
+		{AllowedHostPattern: "^API\\.Stripe\\.com$"},
+		{AllowedHostPattern: "^[a-z]+\\.stripe\\.com$"},
+	}
+	for _, host := range []string{"api.stripe.com", "Api.Stripe.com", "API.STRIPE.COM"} {
+		if err := validateHost(host, listSeal); err != nil {
+			t.Errorf("list mode: host %q should match: %v", host, err)
+		}
+		for i, pat := range patSeals {
+			if err := validateHost(host, pat); err != nil {
+				t.Errorf("pattern mode #%d (%q): host %q should match: %v", i, pat.AllowedHostPattern, host, err)
+			}
+		}
+	}
+}
+
 func TestRejectNonStandardPort(t *testing.T) {
 	cases := map[string]bool{
 		"api.stripe.com":      true,
@@ -250,11 +277,14 @@ func TestValidatePath_percentDecodedTraversal(t *testing.T) {
 	}
 }
 
-func TestValidateHost_caseSensitive(t *testing.T) {
+// Case-insensitivity is locked in by TestValidateHost_caseInsensitive above
+// (FIND-003). Mismatches must still be rejected on different hostnames, not
+// on case differences alone.
+func TestValidateHost_rejectsDifferentHost(t *testing.T) {
 	s := &seal.Secret{AllowedHosts: []string{"api.stripe.com"}}
-	for _, mismatch := range []string{"API.stripe.com", "api.STRIPE.com", "Api.Stripe.Com"} {
+	for _, mismatch := range []string{"api.evil.com", "stripe.com", "api.stripe.com.evil.com"} {
 		if err := validateHost(mismatch, s); err == nil {
-			t.Errorf("expected case-sensitive reject for %q (spec §2.6)", mismatch)
+			t.Errorf("expected reject for %q", mismatch)
 		}
 	}
 }
