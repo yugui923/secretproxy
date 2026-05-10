@@ -63,6 +63,10 @@ type Secret struct {
     AllowedPathPrefixes []string `json:"allowed_path_prefixes,omitempty"`
     AllowedPathPattern  string   `json:"allowed_path_pattern,omitempty"`
     AllowedMethods      []string `json:"allowed_methods,omitempty"`
+
+    // Observability-only; participate in no validation/auth decisions.
+    Name string `json:"name,omitempty"` // operator-supplied label
+    EUID string `json:"euid,omitempty"` // per-seal UUIDv4, auto-stamped by Seal()
 }
 
 func (s *Secret) Validate() error
@@ -81,8 +85,17 @@ type Server struct {
     AllowNoAuth        bool
     AllowPassthrough   bool
     FilteredHeaders    []string
-    SelfHostnames      map[string]struct{}
+    SelfHostnames      map[string]struct{} // lowercased keys
     Logger             *slog.Logger
+
+    // Ingress allowlist + CDN-aware identity (post-v1.0 additions).
+    AllowedClientCIDRs     []netip.Prefix
+    TrustTLSTerminator     bool
+    TrustCloudflareHeaders bool
+
+    // Slowloris / DoS bound (post-v1.0 addition; 0 disables).
+    MaxRequestBytes int64
+
     Transport          http.RoundTripper  // test override
     DisableEgressGuard bool                // test override
 }
