@@ -728,19 +728,34 @@ func (s *Server) guardedDial(ctx context.Context, network, addr string) (net.Con
 	return d.DialContext(ctx, network, dialAddr)
 }
 
-// cgnat4 is RFC 6598 (100.64.0.0/10), used by some Kubernetes CNI plugins
-// (Calico, EKS pods on Fargate) for internal pod networking. net.IP.IsPrivate
-// covers RFC 1918 only; without an explicit check, a sufficiently broad seal
-// + a CGNAT-internal target IP would let an attacker reach cluster-internal
-// services.
-var cgnat4 = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+// extraReservedV4 holds IPv4 ranges that net.IP's predicates miss but the
+// proxy must still refuse to dial:
+//
+//   - 0.0.0.0/8 — "this network", RFC 6890. Linux routes 0.0.0.1–0.255.255.255
+//     to loopback in many configurations, so without this check a seal whose
+//     host pattern admits an IP literal could SSRF localhost.
+//     IsUnspecified covers only 0.0.0.0 itself.
+//   - 100.64.0.0/10 — RFC 6598 CGNAT, used by some Kubernetes CNI plugins
+//     (Calico, EKS pods on Fargate) for internal pod networking.
+//   - 240.0.0.0/4 — RFC 1112 reserved (formerly Class E), and 255.255.255.255
+//     limited broadcast at the top of it. Not routable in practice but reachable
+//     on misconfigured hosts; defense-in-depth.
+var extraReservedV4 = []*net.IPNet{
+	{IP: net.IPv4(0, 0, 0, 0), Mask: net.CIDRMask(8, 32)},
+	{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)},
+	{IP: net.IPv4(240, 0, 0, 0), Mask: net.CIDRMask(4, 32)},
+}
 
 func isPrivateOrLocal(ip net.IP) bool {
 	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return true
 	}
-	if v4 := ip.To4(); v4 != nil && cgnat4.Contains(v4) {
-		return true
+	if v4 := ip.To4(); v4 != nil {
+		for _, n := range extraReservedV4 {
+			if n.Contains(v4) {
+				return true
+			}
+		}
 	}
 	return false
 }

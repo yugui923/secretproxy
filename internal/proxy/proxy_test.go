@@ -459,10 +459,17 @@ func TestIsPrivateOrLocal(t *testing.T) {
 		"100.127.255.1": true,
 		"100.63.255.1":  false, // just outside the bottom of the range
 		"100.128.0.1":   false, // just outside the top of the range
-		"8.8.8.8":       false,
-		"1.1.1.1":       false,
-		"203.0.113.10":  false,
-		"2606:4700::1":  false,
+		// Post-review: 0.0.0.0/8 and 240.0.0.0/4 close two more SSRF
+		// vectors. 0.0.0.1 routes to loopback on Linux in many configs.
+		"0.0.0.1":         true,
+		"0.255.255.255":   true,
+		"240.0.0.1":       true,
+		"255.255.255.255": true,
+		"239.255.255.255": false, // just outside 240/4
+		"8.8.8.8":         false,
+		"1.1.1.1":         false,
+		"203.0.113.10":    false,
+		"2606:4700::1":    false,
 	}
 	for s, want := range cases {
 		got := isPrivateOrLocal(net.ParseIP(s))
