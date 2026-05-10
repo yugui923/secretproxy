@@ -207,7 +207,7 @@ Single `secret-proxy` binary, multiple subcommands:
 - **`seal`** — seals a credential. Public key resolved from `--public-key`, `--public-key-url`, or `SECRET_PROXY_PUBLIC_KEY` env (in that order). Outputs base64 to stdout.
 - **`unseal`** — debug; resolves the private key per §4.1, reads sealed secret from stdin or `--token`.
 - **`request`** — test wrapper. Defaults: `--proxy-url` to `https://localhost:8443`; sealed secret from `SEALED_SECRET` env; bearer token from `AUTH_TOKEN` env. `--proxy-insecure` skips proxy cert verification (dev only).
-- **`gen-tls-cert`** — generates a self-signed Ed25519 cert + key pair to `--out-dir` (default `.`), valid for 90 days, with SANs `localhost`, `127.0.0.1`, `::1`, plus any extras passed via `--san`. **Dev only** — never use the output in production.
+- **`gen-tls-cert`** — generates a self-signed Ed25519 cert + key pair to `--out-dir` (default `.`), valid for 90 days, with SANs `localhost`, `127.0.0.1`, `::1`, plus any extras passed via `--san`. The cert's `Subject.CommonName` is `secret-proxy-dev`; `serve` refuses to bind a listener whose cert matches that CN unless `--allow-dev-cert` (`SECRET_PROXY_ALLOW_DEV_CERT=1`) is also set, so dev material copied into production fails fast. **Dev only** — never carry the output into production.
 - **`gen-keypair`** — generates a fresh Curve25519 keypair and prints `private:` and `public:` hex to stdout. Used for initial keypair provisioning and for rotation.
 
 ```bash

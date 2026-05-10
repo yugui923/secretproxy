@@ -111,6 +111,7 @@ func runServe(args []string) error {
 		return err
 	}
 	idleTimeoutFlag := fs.Duration("idle-timeout", idleTimeoutDefault, "Keep-alive idle timeout; 0 disables. Default 120s.")
+	allowDevCertFlag := fs.Bool("allow-dev-cert", envBool("SECRET_PROXY_ALLOW_DEV_CERT"), "Bind even if the TLS cert was minted by gen-tls-cert (dev material). Required to use the self-signed dev cert in serve mode.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -133,6 +134,13 @@ func runServe(args []string) error {
 		}
 		if _, _, err := proxy.LoadCert(*tlsCertFile, *tlsKeyFile); err != nil {
 			return err
+		}
+		// Dev-cert refusal must run AFTER LoadCert (which surfaces a
+		// missing/unreadable file as a clearer error). IsDevCert
+		// silently returns false on read failure, so reordering would
+		// turn that into a silent bypass.
+		if proxy.IsDevCert(*tlsCertFile) && !*allowDevCertFlag {
+			return proxy.ErrDevCertWithoutAllowFlag
 		}
 	}
 

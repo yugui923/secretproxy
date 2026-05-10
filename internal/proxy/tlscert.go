@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -13,6 +14,17 @@ import (
 	"path/filepath"
 	"time"
 )
+
+// DevCertCommonName is the CN stamped into self-signed certs by
+// gen-tls-cert. The serve command refuses to bind a listener whose cert
+// matches this CN unless --allow-dev-cert is set, so an operator who
+// copies dev material into production fails fast instead of silently
+// running with an untrusted cert that any TLS handshaker will reject.
+const DevCertCommonName = "secret-proxy-dev"
+
+// ErrDevCertWithoutAllowFlag is returned when the configured TLS cert
+// was minted by gen-tls-cert and --allow-dev-cert was not set.
+var ErrDevCertWithoutAllowFlag = errors.New("tls: cert is the gen-tls-cert dev material; pass --allow-dev-cert to use it intentionally, or provision a real cert")
 
 func osHostname() (string, error) {
 	return os.Hostname()
@@ -93,4 +105,25 @@ func LoadCert(certPath, keyPath string) (string, string, error) {
 		return "", "", fmt.Errorf("tls: key file %q: %w", keyPath, err)
 	}
 	return certPath, keyPath, nil
+}
+
+// IsDevCert returns true if the PEM at certPath is a self-signed cert
+// minted by gen-tls-cert (CN = DevCertCommonName). Used by the serve
+// command to refuse the dev material unless --allow-dev-cert is set.
+// Returns false on any read or parse error so a malformed file falls
+// through to the regular TLS load path which surfaces a clearer error.
+func IsDevCert(certPath string) bool {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return false
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return false
+	}
+	c, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	return c.Subject.CommonName == DevCertCommonName
 }
