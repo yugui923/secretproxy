@@ -447,16 +447,22 @@ func TestValidateMethod(t *testing.T) {
 
 func TestIsPrivateOrLocal(t *testing.T) {
 	cases := map[string]bool{
-		"10.0.0.1":     true,
-		"172.16.0.1":   true,
-		"192.168.1.1":  true,
-		"127.0.0.1":    true,
-		"169.254.0.1":  true,
-		"::1":          true,
-		"8.8.8.8":      false,
-		"1.1.1.1":      false,
-		"203.0.113.10": false,
-		"2606:4700::1": false,
+		"10.0.0.1":    true,
+		"172.16.0.1":  true,
+		"192.168.1.1": true,
+		"127.0.0.1":   true,
+		"169.254.0.1": true,
+		"::1":         true,
+		// FIND-006: RFC 6598 CGNAT (used by Calico, EKS Fargate pods).
+		// Range is 100.64.0.0/10 (100.64.0.0 – 100.127.255.255).
+		"100.64.0.1":    true,
+		"100.127.255.1": true,
+		"100.63.255.1":  false, // just outside the bottom of the range
+		"100.128.0.1":   false, // just outside the top of the range
+		"8.8.8.8":       false,
+		"1.1.1.1":       false,
+		"203.0.113.10":  false,
+		"2606:4700::1":  false,
 	}
 	for s, want := range cases {
 		got := isPrivateOrLocal(net.ParseIP(s))

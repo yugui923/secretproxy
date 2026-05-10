@@ -728,8 +728,21 @@ func (s *Server) guardedDial(ctx context.Context, network, addr string) (net.Con
 	return d.DialContext(ctx, network, dialAddr)
 }
 
+// cgnat4 is RFC 6598 (100.64.0.0/10), used by some Kubernetes CNI plugins
+// (Calico, EKS pods on Fargate) for internal pod networking. net.IP.IsPrivate
+// covers RFC 1918 only; without an explicit check, a sufficiently broad seal
+// + a CGNAT-internal target IP would let an attacker reach cluster-internal
+// services.
+var cgnat4 = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
 func isPrivateOrLocal(ip net.IP) bool {
-	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil && cgnat4.Contains(v4) {
+		return true
+	}
+	return false
 }
 
 func stripPort(host string) string {
