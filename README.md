@@ -40,10 +40,13 @@ echo "publish to clients: $(awk '/^public:/{print $2}' keys.txt)"
 # 2. TLS cert + key (dev only — use a real CA in prod).
 secret-proxy gen-tls-cert --out-dir .
 
-# 3. Run.
+# 3. Run. --allow-dev-cert is required when the cert was minted by
+#    gen-tls-cert (CN=secret-proxy-dev); the gate exists so dev material
+#    accidentally copied into production fails fast.
 SECRET_PROXY_PRIVATE_KEY_FILE="$DIR/private.hex" \
 SECRET_PROXY_TLS_CERT_FILE="$DIR/cert.pem" \
 SECRET_PROXY_TLS_KEY_FILE="$DIR/key.pem" \
+SECRET_PROXY_ALLOW_DEV_CERT=1 \
 secret-proxy serve
 ```
 
@@ -168,6 +171,7 @@ SECRET_PROXY_PRIVATE_KEY_FILE=$DIR/priv.hex \
 SECRET_PROXY_TLS_CERT_FILE=$DIR/cert.pem \
 SECRET_PROXY_TLS_KEY_FILE=$DIR/key.pem \
 SECRET_PROXY_LISTEN_ADDRESS=127.0.0.1:18443 \
+SECRET_PROXY_ALLOW_DEV_CERT=1 \
 /tmp/secret-proxy serve > $DIR/serve.log 2>&1 &
 PID=$!
 trap "kill $PID 2>/dev/null" EXIT
