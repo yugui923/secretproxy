@@ -194,6 +194,25 @@ func runServe(args []string) error {
 		server.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
 	}
 
+	// FIND-011: passthrough is a foot-revealer. With it set, requests
+	// without X-Sealed-Secret are forwarded after only the egress guard
+	// (private/loopback IPs, port 443) and the self-loop check — there
+	// is no host allowlist, so a typo'd env var (SECRET_PROXY_ALLOW_PASSTHROUGH=1
+	// added by accident) silently turns the deployment into an open
+	// egress relay. Surface a clear WARN at startup, and a louder one
+	// when no ingress allowlist is also set, so the wrong setting is
+	// visible in any dashboard / log digest.
+	if *allowPassFlag {
+		if len(allowedCIDRs) == 0 {
+			logger.Warn("startup_passthrough_open", "allow_passthrough", true, "allowed_client_cidrs", "(empty)", "reason", "passthrough+no-ingress-allowlist = generic egress relay; verify this is intentional")
+		} else {
+			logger.Warn("startup_passthrough_enabled", "allow_passthrough", true, "allowed_client_cidrs_count", len(allowedCIDRs))
+		}
+	}
+	if *allowNoAuthFlag {
+		logger.Warn("startup_no_auth_enabled", "allow_no_auth", true, "reason", "no_auth seals are accepted; verify this is intentional")
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
