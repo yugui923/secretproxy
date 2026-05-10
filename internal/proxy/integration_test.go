@@ -917,6 +917,108 @@ func TestIntegration_NonStandardPortRejected(t *testing.T) {
 	}
 }
 
+// TestIntegration_StripsClientAuthorization_OnCustomHeaderName locks the
+// FIND-005 fix: when the seal injects to a non-Authorization header
+// (e.g. X-API-Key), any client-supplied Authorization is stripped before
+// upstream forwarding. Without this, a vendor that honors either header
+// could see two distinct identities side-by-side.
+func TestIntegration_StripsClientAuthorization_OnCustomHeaderName(t *testing.T) {
+	upstream, captured := newUpstream(t)
+	defer upstream.Close()
+	p := setupProxy(t, upstream)
+	defer p.stop()
+
+	s := &seal.Secret{
+		BearerAuth: &seal.BearerAuth{Digest: seal.HashBearer("client-token")},
+		InjectHeader: &seal.InjectHeader{
+			Token:      "vendor-secret",
+			Format:     "%s",
+			HeaderName: "X-API-Key",
+		},
+		AllowedHosts:        []string{"api.example.com"},
+		AllowedPathPrefixes: []string{"/v1/charges"},
+		AllowedMethods:      []string{"POST"},
+	}
+	blob, err := seal.Seal(s, p.pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := client.NewTransport(p.url,
+		client.WithSealedSecret(blob),
+		client.WithAuth("client-token"),
+		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
+	)
+	c := &http.Client{Transport: rt, Timeout: 5 * time.Second}
+
+	req, _ := http.NewRequest("POST", "https://api.example.com/v1/charges", nil)
+	// Client tries to smuggle their own Authorization and Proxy-Authorization
+	// in addition to the proxy's X-API-Key injection.
+	req.Header.Set("Authorization", "Bearer attacker-token")
+	req.Header.Set("Proxy-Authorization", "Bearer attacker-proxy-token")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	select {
+	case got := <-captured:
+		if got.headers.Get("Authorization") != "" {
+			t.Errorf("client Authorization leaked to upstream: %q", got.headers.Get("Authorization"))
+		}
+		if got.headers.Get("Proxy-Authorization") != "" {
+			t.Errorf("client Proxy-Authorization leaked to upstream: %q", got.headers.Get("Proxy-Authorization"))
+		}
+		if got.headers.Get("X-API-Key") != "vendor-secret" {
+			t.Errorf("X-API-Key not injected: %q", got.headers.Get("X-API-Key"))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never received the request")
+	}
+}
+
+// TestIntegration_StripsClientAuthorization_OnDefaultAuthorizationInjection
+// is a regression guard for the Del-then-Set ordering: when the seal
+// targets the default "Authorization" header, the proxy still injects its
+// own value rather than leaving the client's value through. (Set after
+// Del is a no-op then Set, which is correct, but the "Del strips its own
+// upcoming Set" anti-pattern is the kind of refactor mistake worth pinning.)
+func TestIntegration_StripsClientAuthorization_OnDefaultAuthorizationInjection(t *testing.T) {
+	upstream, captured := newUpstream(t)
+	defer upstream.Close()
+	p := setupProxy(t, upstream)
+	defer p.stop()
+
+	blob := sealStripeLike(t, p.pub) // injects to "Authorization"
+	rt, _ := client.NewTransport(p.url,
+		client.WithSealedSecret(blob),
+		client.WithAuth("client-token"),
+		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
+	)
+	c := &http.Client{Transport: rt, Timeout: 5 * time.Second}
+
+	req, _ := http.NewRequest("POST", "https://api.example.com/v1/charges", nil)
+	req.Header.Set("Authorization", "Bearer attacker-token")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	select {
+	case got := <-captured:
+		if got.headers.Get("Authorization") != "Bearer sk_live_xxx" {
+			t.Errorf("expected proxy-injected Authorization, got %q", got.headers.Get("Authorization"))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never received the request")
+	}
+}
+
 // TestIntegration_MaxRequestBytes_ContentLengthRefused confirms a request
 // with a Content-Length over the cap is refused with 413 before any forwarding
 // work runs. Without the cap, footgun #8 (slowloris on body) is wide open.

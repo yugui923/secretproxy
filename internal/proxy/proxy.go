@@ -323,6 +323,31 @@ func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url
 			req.Header.Del(h)
 		}
 		if ih != nil {
+			// Strip well-known client-supplied auth headers before
+			// injecting the seal's credential. Without this, a seal with
+			// header_name = "X-API-Key" (custom) forwards the client's
+			// Authorization / Proxy-Authorization untouched alongside the
+			// proxy-injected creds — a vendor that honors either header
+			// would see two distinct identities. The Set call below is
+			// enough to overwrite when headerName matches one of these
+			// (the "Authorization" default), so the Dels are a no-op in
+			// that case; cost is a small constant.
+			//
+			// NOT stripped here:
+			//   - Cookie: some vendor APIs use session cookies for
+			//     legitimate auth that the proxy isn't trying to replace.
+			//   - Vendor-specific bearer aliases (X-Auth-Token,
+			//     X-Access-Token, X-Api-Key on a non-X-Api-Key seal,
+			//     Api-Key, Token).
+			//   - mTLS / reverse-proxy trust headers (X-SSL-Client-*,
+			//     X-Client-Cert, X-Forwarded-Client-Cert / XFCC). These
+			//     are dangerous if the upstream sits behind an ingress
+			//     that trusts them — a client can forge identity.
+			// Operators who need any of those stripped must list them in
+			// SECRET_PROXY_FILTERED_HEADERS for their topology.
+			req.Header.Del("Authorization")
+			req.Header.Del("Proxy-Authorization")
+			req.Header.Del("Proxy-Authenticate")
 			req.Header.Set(headerName, fmt.Sprintf(format, ih.Token))
 		}
 	}
