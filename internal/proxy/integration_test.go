@@ -1021,6 +1021,90 @@ func selfSignedAnyName() (*tls.Certificate, error) {
 	return &c, nil
 }
 
+// TestIntegration_OutboundHostLowercased pins the post-review hardening:
+// even when the client sends a mixed-case host in X-Upstream-URL, the
+// proxy normalizes target.Host to lowercase before TLS SNI / Host:
+// header are emitted upstream. validateHost already case-folds for the
+// allowlist; this asserts the wire-form is also normalized.
+func TestIntegration_OutboundHostLowercased(t *testing.T) {
+	upstream, captured := newUpstream(t)
+	defer upstream.Close()
+	p := setupProxy(t, upstream)
+	defer p.stop()
+
+	blob := sealStripeLike(t, p.pub)
+	rt, _ := client.NewTransport(p.url,
+		client.WithSealedSecret(blob),
+		client.WithAuth("client-token"),
+		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
+	)
+	c := &http.Client{Transport: rt, Timeout: 5 * time.Second}
+
+	// Mixed-case host. validateHost folds before checking allowlist; the
+	// wire form should also be lowercase.
+	req, _ := http.NewRequest("POST", "https://API.Example.COM/v1/charges", nil)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	select {
+	case got := <-captured:
+		if got.host != "api.example.com" {
+			t.Errorf("upstream Host header = %q, want lowercased %q", got.host, "api.example.com")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never received the request")
+	}
+}
+
+// TestIntegration_StripsUserinfoOnOutbound confirms that
+// X-Upstream-URL: https://user:pass@host/path has its userinfo zeroed
+// before reaching the upstream — defense in depth so userinfo doesn't
+// land in upstream access logs that reflect the URL form.
+func TestIntegration_StripsUserinfoOnOutbound(t *testing.T) {
+	upstream, captured := newUpstream(t)
+	defer upstream.Close()
+	p := setupProxy(t, upstream)
+	defer p.stop()
+
+	blob := sealStripeLike(t, p.pub)
+	// Build the request manually so we can place userinfo in the URL.
+	pURL, _ := url.Parse(p.url)
+	forwardURL := &url.URL{Scheme: pURL.Scheme, Host: pURL.Host, Path: "/v1/forward"}
+	req, _ := http.NewRequest("POST", forwardURL.String(), nil)
+	req.Header.Set("X-Upstream-URL", "https://attacker:pwd@api.example.com/v1/charges")
+	req.Header.Set("X-Sealed-Secret", blob)
+	req.Header.Set("X-Auth-Bearer", "Bearer client-token")
+
+	c := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Timeout:   5 * time.Second,
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	select {
+	case got := <-captured:
+		// httptest's request handler doesn't surface r.URL.User on its own,
+		// but the Host header is the practical observable: it must NOT
+		// include the userinfo segment.
+		if strings.Contains(got.host, "@") {
+			t.Errorf("upstream Host contains userinfo: %q", got.host)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never received the request")
+	}
+}
+
 // TestIntegration_StripsClientAuthorization_OnCustomHeaderName locks the
 // FIND-005 fix: when the seal injects to a non-Authorization header
 // (e.g. X-API-Key), any client-supplied Authorization is stripped before

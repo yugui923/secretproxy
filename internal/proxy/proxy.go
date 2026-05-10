@@ -301,7 +301,18 @@ func (s *Server) logForwardOutcome(event string, copyErr error, status int, star
 func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url.URL, ih *seal.InjectHeader, format, headerName string) (copyErr error) {
 	target := *upstream
 	target.Scheme = "https"
-	target.Host = stripPort(upstream.Host)
+	// Lowercase the dialed/SNI host so the wire form matches DNS
+	// semantics (which validateHost already case-folds). Without this,
+	// an X-Upstream-URL of https://API.Stripe.COM/... reaches the
+	// upstream's request log and TLS SNI in mixed case, which can
+	// confuse cookie-domain scoping and observability tooling.
+	target.Host = strings.ToLower(stripPort(upstream.Host))
+	// Strip userinfo (https://user:pass@host/...). Go's net/http
+	// Transport does not auto-emit Authorization from URL.User on the
+	// outbound request, so this is a no-op for cred injection today,
+	// but the upstream still sees the userinfo in any access log that
+	// reflects the request URL. Defense in depth.
+	target.User = nil
 	if target.Host == "" {
 		http.Error(w, "missing target host", http.StatusBadRequest)
 		return nil
