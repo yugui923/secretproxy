@@ -1,5 +1,5 @@
 // Package client provides an http.RoundTripper that drives requests through
-// the Secret Proxy via the v2 relative-endpoint mode (§3.1):
+// the Secret Proxy via the v1 relative-endpoint wire protocol (spec §3.1):
 //
 //	POST /v1/forward HTTP/1.1
 //	Host: secret-proxy.example.com

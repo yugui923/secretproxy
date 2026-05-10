@@ -16,10 +16,10 @@ func TestNewTransport_invalidScheme(t *testing.T) {
 	}
 }
 
-// TestRoundTrip_v2Forward verifies the v2 wire envelope: a normal relative-URL
+// TestRoundTrip_v1Forward verifies the v1 wire envelope: a normal relative-URL
 // POST to /v1/forward with X-Upstream-URL, X-Sealed-Secret, X-Auth-Bearer.
 // Method mirrors and the original target URL travels in the header.
-func TestRoundTrip_v2Forward(t *testing.T) {
+func TestRoundTrip_v1Forward(t *testing.T) {
 	var got atomic.Pointer[http.Request]
 
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
