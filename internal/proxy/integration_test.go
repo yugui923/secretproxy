@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -915,6 +916,109 @@ func TestIntegration_NonStandardPortRejected(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403 for non-443 port, got %d", resp.StatusCode)
 	}
+}
+
+// TestIntegration_UpstreamSNIMatchesSealHost is the FIND-016 regression
+// guard: when the proxy dials an upstream by IP (after resolving the
+// hostname), the TLS handshake's ServerName (SNI) MUST track the seal's
+// hostname, not the resolved IP. Today httputil.ReverseProxy sets
+// req.Host = target.Host, so SNI carries api.example.com — we assert
+// that. A future refactor that passed `addr` (the IP) into the dial
+// would silently break SNI / cert validation; this test pins the
+// invariant.
+func TestIntegration_UpstreamSNIMatchesSealHost(t *testing.T) {
+	const expectedSNI = "api.example.com"
+	// SNI is captured in the TLS handshake goroutine and read in the
+	// test goroutine; pass via a buffered channel to avoid a data race
+	// (go test -race would flag a shared string).
+	sniCh := make(chan string, 1)
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	upstream.TLS = &tls.Config{
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			select {
+			case sniCh <- hello.ServerName:
+			default:
+				// Channel already has the first SNI; ignore reuse.
+			}
+			cert, err := selfSignedAnyName()
+			if err != nil {
+				return nil, err
+			}
+			return cert, nil
+		},
+	}
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	pub, priv, _ := seal.GenerateKeypair()
+	srv := &Server{
+		PrivateKey:         &priv,
+		Transport:          hijackingTransport(upstream.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true}),
+		DisableEgressGuard: true,
+		Logger:             discardLogger(),
+		SelfHostnames:      map[string]struct{}{},
+	}
+	pURL, stop := startProxy(t, srv)
+	defer stop()
+
+	s := &seal.Secret{
+		BearerAuth:          &seal.BearerAuth{Digest: seal.HashBearer("client-token")},
+		InjectHeader:        &seal.InjectHeader{Token: "vendor-secret", HeaderName: "Authorization", Format: "Bearer %s"},
+		AllowedHosts:        []string{expectedSNI},
+		AllowedPathPrefixes: []string{"/v1"},
+		AllowedMethods:      []string{"GET"},
+	}
+	blob, err := seal.Seal(s, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := client.NewTransport(pURL,
+		client.WithSealedSecret(blob),
+		client.WithAuth("client-token"),
+		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
+	)
+	c := &http.Client{Transport: rt, Timeout: 5 * time.Second}
+	req, _ := http.NewRequest("GET", "https://"+expectedSNI+"/v1/ping", nil)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	select {
+	case capturedSNI := <-sniCh:
+		if capturedSNI != expectedSNI {
+			t.Fatalf("upstream SNI = %q, want %q (the seal's host, not the dialed IP)", capturedSNI, expectedSNI)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TLS handshake did not capture SNI within 1s")
+	}
+}
+
+// selfSignedAnyName mints an Ed25519 self-signed cert with
+// SubjectAltName = "*" / 0.0.0.0 / ::0 so the test client accepts it
+// regardless of which SNI was offered. Used by
+// TestIntegration_UpstreamSNIMatchesSealHost.
+func selfSignedAnyName() (*tls.Certificate, error) {
+	dir, err := os.MkdirTemp("", "secret-proxy-sni-test-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	certPath, keyPath, err := GenerateSelfSignedTLS(dir, []string{"api.example.com", "127.0.0.1"})
+	if err != nil {
+		return nil, err
+	}
+	c, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // TestIntegration_StripsClientAuthorization_OnCustomHeaderName locks the
