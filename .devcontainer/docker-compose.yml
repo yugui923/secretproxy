@@ -14,9 +14,12 @@ services:
     volumes:
       - ..:/workspace
       - claude-code-data:/home/vscode/.claude
+      - codex-data:/home/vscode/.codex
     network_mode: host
     command: sleep infinity
 
 volumes:
   claude-code-data:
     name: secretproxy-claude-code-data
+  codex-data:
+    name: secretproxy-codex-data

@@ -9,22 +9,10 @@
   "customizations": {
     "vscode": {
       "extensions": [
-        "anthropic.claude-code",
-        "charliermarsh.ruff",
-        "davidanson.vscode-markdownlint",
-        "dbaeumer.vscode-eslint",
-        "eamodio.gitlens",
-        "esbenp.prettier-vscode",
-        "gruntfuggly.todo-tree",
-        "mhutchie.git-graph",
-        "ms-ossdata.vscode-pgsql",
         "ms-python.debugpy",
         "ms-python.python",
         "ms-python.vscode-pylance",
-        "ms-vscode-remote.remote-containers",
-        "redhat.vscode-xml",
-        "rust-lang.rust-analyzer",
-        "tamasfe.even-better-toml"
+        "ms-vscode-remote.remote-containers"
       ],
       "settings": {
         "[javascript]": {
