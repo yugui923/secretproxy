@@ -18,8 +18,8 @@ jobs:
   # Dependabot updates on a real bump.
   #
   # Go is pinned to a specific patch version rather than "1.25.x" so a
-  # govulncheck CVE that lands in a stdlib patch (1.25.10 closed three
-  # of them in May 2026) doesn't sit in CI behind a wildcard that the
+  # govulncheck CVE that lands in a stdlib patch (1.25.12 closed three
+  # more in July 2026) doesn't sit in CI behind a wildcard that the
   # actions/setup-go cache hasn't refreshed yet. Bump alongside go.mod's
   # toolchain directive.
   test:
@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.25.10"]
+        go: ["1.25.12"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -55,7 +55,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.25.10"
+          go-version: "1.25.12"
           cache: true
       # FIND-017: scan stdlib + module deps against the Go vulnerability
       # database. Fails the build on any known CVE that the binary actually
@@ -76,7 +76,7 @@ jobs:
           fetch-depth: 0 # gitleaks scans full history on push events
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.25.10"
+          go-version: "1.25.12"
           cache: true
       # The repo is public and built around secret handling; CLAUDE.md
       # already mandates gitleaks pre-commit. CI re-runs it as a backstop
