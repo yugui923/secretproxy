@@ -1,0 +1,176 @@
+name: Code security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GUARDDOG_IMAGE: ghcr.io/datadog/guarddog@sha256:5b0804d480e83405120fc90c62b60ad844310418c836e567055b1ba8843e033d # v3.2.0
+
+jobs:
+  opengrep:
+    name: OpenGrep
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install OpenGrep
+        env:
+          OPENGREP_VERSION: "1.27.1"
+          OPENGREP_SHA256: "58053da76672bbeb5b0a5441021c58338707052e10f81d777140ca879bd491ce"
+          OPENGREP_RULES_COMMIT: "e7643a008ec9027c96dfef7bdf5aedcac3847da8"
+        run: |
+          set -euo pipefail
+          url="https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          curl -fsSL -o /tmp/opengrep "$url"
+          echo "${OPENGREP_SHA256}  /tmp/opengrep" | sha256sum --check --strict
+          chmod 0755 /tmp/opengrep
+          git init --quiet /tmp/opengrep-rules
+          git -C /tmp/opengrep-rules remote add origin \
+            https://github.com/amplify-security/opengrep-rules.git
+          git -C /tmp/opengrep-rules fetch --quiet --depth=1 origin \
+            "$OPENGREP_RULES_COMMIT"
+          test "$(git -C /tmp/opengrep-rules rev-parse FETCH_HEAD)" = \
+            "$OPENGREP_RULES_COMMIT"
+          git -C /tmp/opengrep-rules checkout --quiet --detach FETCH_HEAD
+          mkdir /tmp/opengrep-selected
+          while IFS= read -r rule_path; do
+            test -n "$rule_path"
+            install -Dm0644 "/tmp/opengrep-rules/$rule_path" \
+              "/tmp/opengrep-selected/$rule_path"
+          done <<'RULES'
+          dockerfile/security/last-user-is-root.yaml
+          go/lang/security/audit/crypto/bad_imports.yaml
+          go/lang/security/audit/crypto/math_random.yaml
+          go/lang/security/audit/crypto/missing-ssl-minversion.yaml
+          go/lang/security/audit/crypto/tls.yaml
+          go/lang/security/audit/crypto/use_of_weak_crypto.yaml
+          go/lang/security/audit/crypto/use_of_weak_rsa_key.yaml
+          go/lang/security/audit/dangerous-command-write.yaml
+          go/lang/security/audit/dangerous-exec-cmd.yaml
+          go/lang/security/audit/dangerous-exec-command.yaml
+          go/lang/security/audit/dangerous-syscall-exec.yaml
+          go/lang/security/audit/net/pprof.yaml
+          go/lang/security/audit/reflect-makefunc.yaml
+          go/lang/security/audit/unsafe-reflect-by-name.yaml
+          go/lang/security/audit/unsafe.yaml
+          go/lang/security/decompression_bomb.yaml
+          go/lang/security/filepath-clean-misuse.yaml
+          go/lang/security/shared-url-struct-mutation.yaml
+          RULES
+      - name: Scan for high-signal code vulnerabilities
+        run: >-
+          /tmp/opengrep scan --disable-version-check
+          --config /tmp/opengrep-selected --severity ERROR --error .
+
+  guarddog-go:
+    name: GuardDog / Go
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Count locked Go modules
+        run: |
+          set -euo pipefail
+          awk '
+            /^require \(/ { in_block = 1; next }
+            in_block && /^\)/ { in_block = 0; next }
+            in_block && NF && $1 !~ /^\/\// { count++ }
+            $1 == "require" && $2 != "(" { count++ }
+            END { print count + 0 }
+          ' go.mod > "${RUNNER_TEMP}/guarddog-expected-count.txt"
+      - name: Scan locked Go modules
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --tmpfs /tmp:rw,nosuid,nodev,size=2g \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --env GUARDDOG_PARALLELISM=4 \
+            --volume "${GITHUB_WORKSPACE}/go.mod:/work/go.mod:ro" \
+            "$GUARDDOG_IMAGE" go verify --output-format json \
+            /work/go.mod > "${RUNNER_TEMP}/guarddog.json"
+          expected_count=$(cat "${RUNNER_TEMP}/guarddog-expected-count.txt")
+          actual_count=$(jq 'length' "${RUNNER_TEMP}/guarddog.json")
+          test "$actual_count" -eq "$expected_count"
+          if ! jq --exit-status '
+            all(.[].result;
+              (.risk_score.score | type) == "number"
+              and (.risk_score.label | type) == "string"
+            )
+          ' "${RUNNER_TEMP}/guarddog.json" > /dev/null; then
+            echo "::error::GuardDog returned incomplete Go scan results"
+            jq -r '
+              .[]
+              | select(
+                  (.result.risk_score.score | type) != "number"
+                  or (.result.risk_score.label | type) != "string"
+                )
+              | "\(.dependency)@\(.version): \(.result.errors // {"scan-result": "missing risk score"} | tojson)"
+            ' "${RUNNER_TEMP}/guarddog.json"
+            exit 1
+          fi
+          jq -r '
+            .[]
+            | select((.result.errors // {}) | length > 0)
+            | "\(.dependency)@\(.version): tolerated detector errors: \(.result.errors | keys | join(", "))"
+          ' "${RUNNER_TEMP}/guarddog.json"
+          jq -r '.[] | select(.result.risk_score.score > 0) | "\(.dependency)@\(.version): \(.result.risk_score.label) (\(.result.risk_score.score))"' \
+            "${RUNNER_TEMP}/guarddog.json"
+      - name: Enforce GuardDog high-risk policy
+        env:
+          GUARDDOG_ECOSYSTEM: go
+        run: |
+          set -euo pipefail
+          jq -r --arg ecosystem "$GUARDDOG_ECOSYSTEM" \
+            --slurpfile allowlist .github/guarddog-allowlist.json '
+              .[]
+              | select(.result.risk_score.label == "high_risk")
+              | . as $finding
+              | select(
+                  ($allowlist[0].allow
+                    | any(
+                        .ecosystem == $ecosystem
+                        and .package == $finding.dependency
+                        and .version == $finding.version
+                      )
+                  ) | not
+                )
+              | "\(.dependency)@\(.version): \(.result.risk_score.score)"
+            ' "${RUNNER_TEMP}/guarddog.json" > "${RUNNER_TEMP}/guarddog-blocked.txt"
+          if test -s "${RUNNER_TEMP}/guarddog-blocked.txt"; then
+            echo "::error::GuardDog found unallowlisted high-risk Go modules"
+            sed 's/^/  /' "${RUNNER_TEMP}/guarddog-blocked.txt"
+            exit 1
+          fi
+
+  gate:
+    name: Code security / gate
+    if: ${{ always() }}
+    needs: [opengrep, guarddog-go]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Require every code-security job to pass
+        env:
+          OPENGREP_RESULT: ${{ needs.opengrep.result }}
+          GUARDDOG_GO_RESULT: ${{ needs.guarddog-go.result }}
+        run: |
+          test "$OPENGREP_RESULT" = "success"
+          test "$GUARDDOG_GO_RESULT" = "success"
