@@ -34,6 +34,11 @@ services:
       - key: SECRET_PROXY_LOG_LEVEL
         value: info
 
+      # Do not reveal the inbound peer through Go's automatically generated
+      # outbound X-Forwarded-For header.
+      - key: SECRET_PROXY_DISABLE_X_FORWARDED_FOR
+        value: "1"
+
       # ── Set in the Render dashboard (sync: false), NEVER in this file ────
       #
       # SECRET_PROXY_SELF_HOSTNAMES — every hostname this proxy is publicly

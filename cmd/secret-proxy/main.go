@@ -92,6 +92,7 @@ func runServe(args []string) error {
 	allowNoAuthFlag := fs.Bool("allow-no-auth", allowNoAuth, "Permit no_auth sealed secrets")
 	allowPassFlag := fs.Bool("allow-passthrough", allowPass, "Forward requests without a sealed secret")
 	filteredFlag := fs.String("filtered-headers", filteredEnv, "Comma-separated extra request headers to strip")
+	disableXFFFlag := fs.Bool("disable-x-forwarded-for", envBool("SECRET_PROXY_DISABLE_X_FORWARDED_FOR"), "Do not add X-Forwarded-For to upstream requests")
 	selfHostsFlag := fs.String("self-hostnames", selfHostsEnv, "Comma-separated extra self-loop-guard hostnames")
 	trustTermFlag := fs.Bool("trust-tls-terminator", envBool("SECRET_PROXY_TRUST_TLS_TERMINATOR"), "Listen plaintext (only safe when fronted by a TLS terminator: PaaS edge LB, mesh, ingress)")
 	allowedCIDRsFlag := fs.String("allowed-client-cidrs", allowedCIDRsEnv, "Comma-separated ingress IP allowlist on /v1/forward (CIDR or bare IP)")
@@ -156,6 +157,7 @@ func runServe(args []string) error {
 		AllowNoAuth:            *allowNoAuthFlag,
 		AllowPassthrough:       *allowPassFlag,
 		FilteredHeaders:        splitCSV(*filteredFlag),
+		DisableXForwardedFor:   *disableXFFFlag,
 		SelfHostnames:          proxy.AutoSelfHostnames(splitCSV(*selfHostsFlag)),
 		AllowedClientCIDRs:     allowedCIDRs,
 		TrustTLSTerminator:     *trustTermFlag,
