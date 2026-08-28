@@ -649,6 +649,48 @@ func TestIntegration_FilteredHeadersRemoved(t *testing.T) {
 	}
 }
 
+// TestIntegration_DisableXForwardedFor confirms that the explicit privacy
+// control suppresses both a client-supplied value and ReverseProxy's automatic
+// TCP-peer value. Header.Del alone cannot suppress the automatic value.
+func TestIntegration_DisableXForwardedFor(t *testing.T) {
+	upstream, captured := newUpstream(t)
+	defer upstream.Close()
+	_, priv, _ := seal.GenerateKeypair()
+	srv := &Server{
+		PrivateKey:           &priv,
+		AllowPassthrough:     true,
+		DisableXForwardedFor: true,
+		Transport:            hijackingTransport(upstream.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true}),
+		DisableEgressGuard:   true,
+		Logger:               discardLogger(),
+		SelfHostnames:        map[string]struct{}{},
+	}
+	pURL, stop := startProxy(t, srv)
+	defer stop()
+
+	rt, _ := client.NewTransport(pURL,
+		client.WithProxyTLS(&tls.Config{InsecureSkipVerify: true}),
+	)
+	c := &http.Client{Transport: rt, Timeout: 5 * time.Second}
+
+	req, _ := http.NewRequest(http.MethodGet, "https://api.example.com/whatever", nil)
+	req.Header.Set("Authorization", "Bearer existing-token")
+	req.Header.Set("X-Forwarded-For", "203.0.113.42")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	got := <-captured
+	if values, ok := got.headers["X-Forwarded-For"]; ok {
+		t.Errorf("X-Forwarded-For present upstream: %v", values)
+	}
+	if authorization := got.headers.Get("Authorization"); authorization != "Bearer existing-token" {
+		t.Errorf("Authorization = %q, want existing token", authorization)
+	}
+}
+
 // TestIntegration_ClientAuthorizationOverwritten guards against credential
 // smuggling: a client that ships its own Authorization header alongside the
 // proxy contract must not have that header survive — the seal's injected

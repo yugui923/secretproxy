@@ -88,8 +88,12 @@ type Server struct {
 	AllowNoAuth        bool
 	AllowPassthrough   bool
 	FilteredHeaders    []string
-	SelfHostnames      map[string]struct{}
-	Logger             *slog.Logger
+	// DisableXForwardedFor suppresses httputil.ReverseProxy's default
+	// X-Forwarded-For header on outbound requests. Ingress checks still read
+	// the original inbound header before the outbound request is rewritten.
+	DisableXForwardedFor bool
+	SelfHostnames        map[string]struct{}
+	Logger               *slog.Logger
 
 	// AllowedClientCIDRs gates ingress to /v1/forward. Empty = off.
 	AllowedClientCIDRs []netip.Prefix
@@ -337,6 +341,13 @@ func (s *Server) forwardTo(w http.ResponseWriter, r *http.Request, upstream *url
 		}
 		for _, h := range s.FilteredHeaders {
 			req.Header.Del(h)
+		}
+		if s.DisableXForwardedFor {
+			// A nil header value is httputil.ReverseProxy's documented sentinel
+			// for suppressing its automatic X-Forwarded-For injection. Del is
+			// insufficient because ReverseProxy adds the TCP peer address after
+			// Director returns.
+			req.Header["X-Forwarded-For"] = nil
 		}
 		if ih != nil {
 			// Strip well-known client-supplied auth headers before
