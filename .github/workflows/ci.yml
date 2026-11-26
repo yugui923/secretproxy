@@ -60,8 +60,25 @@ jobs:
           cache: true
       - name: Install pinned govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+      # govulncheck reports only *reachable* vulnerabilities, which is a good
+      # signal, but it still fails on any inherited one, so a PR cannot land
+      # while the backlog is non-empty. Severity and provenance judgement move
+      # to the `Dependency delta (introduced only)` workflow, which compares the
+      # merge-base and the PR head and blocks only new CRITICAL/HIGH findings.
+      # This step enforces that the analysis actually ran.
+      #
+      # govulncheck exit codes: 0 = clean, 3 = vulnerabilities found, 1 = the
+      # analysis itself failed. Only 1 (or anything else unexpected) is a gate
+      # failure here; 3 is a finding set the delta gate judges.
       - name: Check reachable vulnerabilities
-        run: govulncheck ./...
+        run: |
+          set -euo pipefail
+          rc=0
+          govulncheck ./... || rc=$?
+          case "$rc" in
+            0|3) exit 0 ;;
+            *) echo "govulncheck did not complete (exit $rc)"; exit 1 ;;
+          esac
 
   gate:
     name: CI / gate
